@@ -1,6 +1,6 @@
-class LinuxEnv:
+class MacEnv:
     def __init__(self):
         pass
 
-    def install_nginx(self):
+    def install_brew(self):
         pass
