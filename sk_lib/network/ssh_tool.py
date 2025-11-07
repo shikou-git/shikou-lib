@@ -171,7 +171,7 @@ class SSHTool:
                     return True
                 else:
                     logger.debug(f"路径存在但不是文件: {file_path}")
-                    return False
+                    raise ValueError(f"路径存在但不是文件: {file_path}")
 
         except (IOError, OSError, FileNotFoundError):
             logger.debug(f"文件不存在: {file_path}")
@@ -201,7 +201,7 @@ class SSHTool:
                     return True
                 else:
                     logger.debug(f"路径存在但不是目录: {dir_path}")
-                    return False
+                    raise ValueError(f"路径存在但不是目录: {dir_path}")
 
         except (IOError, OSError, FileNotFoundError):
             logger.debug(f"目录不存在: {dir_path}")
@@ -612,7 +612,7 @@ class SSHTool:
 
         except FileNotFoundError:
             logger.error(f"远程路径不存在: {remote_path}")
-            return False
+            raise
 
         except Exception as e:
             logger.error(f"设置权限失败: {remote_path} -> {oct(mode)}, 错误: {e}")
@@ -641,7 +641,7 @@ class SSHTool:
 
         except FileNotFoundError:
             logger.error(f"源路径不存在: {src_path}")
-            return False
+            raise
 
         except Exception as e:
             logger.error(f"重命名/移动失败: {src_path} -> {dst_path}, 错误: {e}")
@@ -691,7 +691,7 @@ class SSHTool:
 
         except FileNotFoundError:
             logger.error(f"远程路径不存在: {remote_path}")
-            return False, {"error": "not found"}
+            raise
 
         except Exception as e:
             logger.error(f"获取信息失败: {remote_path}, 错误: {e}")
