@@ -99,32 +99,52 @@ class SSHTool:
 
     @ensure_connected
     def run_cmd(self, command: str, timeout: int | None = None) -> tuple[bool, str]:
-        """执行SSH命令
+        """
+        在远程主机上执行 shell 命令。
+
+        判断依据：
+            - 成功：exit code == 0
+            - 失败：exit code != 0 或执行过程中发生异常
+
+        返回内容：
+            - 成功时：返回 stdout（可能为空）
+            - 失败时：优先返回 stderr；若 stderr 为空，则返回 stdout（例如 grep -q）
 
         Args:
-            command: 要执行的命令
-            timeout: 命令执行超时时间（秒），None表示不限制
+            command: 要执行的 shell 命令
+            timeout: 执行超时时间（秒），None 表示无限制
 
         Returns:
-            tuple[bool, str]: (是否成功, 命令输出/错误信息)
+            tuple[bool, str]: (是否成功, 输出内容)
         """
         try:
-            logger.debug(f"执行命令: {command}")
+            logger.debug(f"Executing remote command: {command}")
             stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
 
-            output = stdout.read().decode("utf-8", errors="ignore").strip()
-            error = stderr.read().decode("utf-8", errors="ignore").strip()
+            # 必须先读取 stdout/stderr，再获取 exit status，避免缓冲区阻塞
+            stdout_content = stdout.read().decode("utf-8", errors="replace").strip()
+            stderr_content = stderr.read().decode("utf-8", errors="replace").strip()
             exit_status = stdout.channel.recv_exit_status()
 
+            # 日志记录（截断过长内容，避免日志爆炸）
+            def truncate(s: str, length: int = 500) -> str:
+                return s if len(s) <= length else s[:length] + "…(truncated)"
+
             if exit_status == 0:
-                logger.debug(f"执行命令成功: \n{output}")
-                return True, output
+                logger.debug(f"Command succeeded (exit=0). stdout: {truncate(stdout_content)!r}")
+                return True, stdout_content
             else:
-                logger.debug(f"执行命令失败 (exit_code={exit_status}): \n{error if error else output}")
-                return False, error if error else output
+                # 失败时：优先使用 stderr，若为空则 fallback 到 stdout
+                msg = stderr_content if stderr_content else stdout_content
+                logger.warning(
+                    f"Command failed (exit={exit_status}). "
+                    f"stderr: {truncate(stderr_content)!r}, "
+                    f"stdout: {truncate(stdout_content)!r}"
+                )
+                return False, msg
 
         except Exception as e:
-            logger.error(f"执行命令出错: {command}, 错误: {e}")
+            logger.error(f"Exception during command execution: {command!r} → {e!r}")
             return False, str(e)
 
     @ensure_connected
