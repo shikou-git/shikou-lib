@@ -62,6 +62,560 @@ class LinuxEnv:
         logger.error(f"等待服务器重启超时 (超过 {max_wait_time} 秒)")
         return False
 
+    def kill_process_by_name(self, process_name: str, force: bool = False, case_sensitive: bool = True) -> bool:
+        """根据进程名杀死进程
+
+        Args:
+            process_name: 进程名称
+            force: 是否强制杀死（使用 SIGKILL 信号），默认 False（使用 SIGTERM）
+            case_sensitive: 是否区分大小写，默认 True（区分大小写）
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        # 构建 killall 命令
+        cmd_parts = ["killall"]
+
+        # 如果强制杀死，使用 -9 信号
+        if force:
+            cmd_parts.append("-9")
+
+        # 如果不区分大小写，添加 -I 参数
+        if not case_sensitive:
+            cmd_parts.append("-I")
+
+        cmd_parts.append(process_name)
+
+        cmd = " ".join(cmd_parts)
+        logger.info(f"执行命令: {cmd}")
+
+        success, output = self.ssh_tool.run_cmd(cmd)
+
+        if success:
+            logger.info(f"成功杀死进程: {process_name}")
+            return True
+        else:
+            # killall 在找不到进程时会返回非零退出码，但不一定是错误
+            # 检查输出中是否包含 "no process found" 或类似信息
+            output_lower = output.lower()
+            if "no process found" in output_lower or "no such process" in output_lower:
+                logger.warning(f"未找到进程: {process_name}")
+                return False
+            else:
+                logger.error(f"杀死进程失败: {process_name}, 错误: {output}")
+                return False
+
+    def kill_process_by_pid(self, process_id: int, force: bool = False) -> bool:
+        """根据进程ID杀死进程
+
+        Args:
+            process_id: 进程ID（PID）
+            force: 是否强制杀死（使用 SIGKILL 信号），默认 False（使用 SIGTERM）
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        # 构建 kill 命令
+        if force:
+            signal = "-9"
+        else:
+            signal = "-15"  # SIGTERM，默认信号
+
+        cmd = f"kill {signal} {process_id}"
+        logger.info(f"执行命令: {cmd}")
+
+        success, output = self.ssh_tool.run_cmd(cmd)
+
+        if success:
+            logger.info(f"成功杀死进程: PID {process_id}")
+            return True
+        else:
+            # kill 命令在找不到进程时会返回非零退出码
+            output_lower = output.lower()
+            if "no such process" in output_lower or "invalid argument" in output_lower:
+                logger.warning(f"未找到进程: PID {process_id}")
+                return False
+            else:
+                logger.error(f"杀死进程失败: PID {process_id}, 错误: {output}")
+                return False
+
+    def kill_process_by_pids(self, process_ids: list[int], force: bool = False) -> dict[int, bool]:
+        """根据进程ID列表批量杀死进程
+
+        Args:
+            process_ids: 进程ID列表
+            force: 是否强制杀死（使用 SIGKILL 信号），默认 False（使用 SIGTERM）
+
+        Returns:
+            dict[int, bool]: 返回每个进程ID和对应的执行结果，True表示成功，False表示失败
+        """
+        if not process_ids:
+            logger.warning("进程ID列表为空")
+            return {}
+
+        # 构建 kill 命令，可以一次性杀死多个进程
+        if force:
+            signal = "-9"
+        else:
+            signal = "-15"  # SIGTERM，默认信号
+
+        # 将所有PID转换为字符串并拼接
+        pids_str = " ".join(str(pid) for pid in process_ids)
+        cmd = f"kill {signal} {pids_str}"
+        logger.info(f"执行命令: {cmd}")
+
+        success, output = self.ssh_tool.run_cmd(cmd)
+
+        # 初始化结果字典，默认都设为成功
+        results = {pid: True for pid in process_ids}
+
+        if success:
+            logger.info(f"成功杀死进程: PIDs {process_ids}")
+            return results
+        else:
+            # kill 命令在部分进程不存在时仍可能返回非零退出码
+            # 需要检查哪些进程确实被杀死了
+            output_lower = output.lower()
+
+            # 如果输出中包含 "no such process"，说明有些进程不存在
+            # 但 kill 命令会尝试杀死所有进程，已存在的进程会被杀死
+            # 为了更准确地判断，我们可以逐个检查进程是否还存在
+            # 或者直接返回结果，因为 kill 命令会尽力杀死所有存在的进程
+
+            # 检查输出中是否有错误信息
+            if "no such process" in output_lower or "invalid argument" in output_lower:
+                # 对于不存在的进程，标记为失败
+                # 但由于 kill 命令的输出可能不够详细，我们采用保守策略
+                # 如果命令失败，我们逐个检查进程是否还存在
+                logger.warning(f"部分进程可能不存在，正在验证...")
+
+                # 逐个检查进程是否还存在
+                for pid in process_ids:
+                    # 使用 ps 命令检查进程是否存在
+                    check_cmd = f"ps -p {pid} > /dev/null 2>&1"
+                    check_success, _ = self.ssh_tool.run_cmd(check_cmd)
+                    # 如果进程不存在（ps 返回非零），说明已经被杀死或本来就不存在
+                    # 如果进程还存在（ps 返回成功），说明杀死失败
+                    results[pid] = not check_success
+
+                # 统计结果
+                success_count = sum(1 for v in results.values() if v)
+                logger.info(f"批量杀死进程完成: 成功 {success_count}/{len(process_ids)}")
+            else:
+                # 其他错误，标记所有为失败
+                logger.error(f"杀死进程失败: PIDs {process_ids}, 错误: {output}")
+                results = {pid: False for pid in process_ids}
+
+            return results
+
+    def get_pids_by_name(self, process_name: str, case_sensitive: bool = True) -> list[int]:
+        """根据进程名获取进程ID列表
+
+        Args:
+            process_name: 进程名称
+            case_sensitive: 是否区分大小写，默认 True（区分大小写）
+
+        Returns:
+            list[int]: 进程ID列表，如果未找到进程则返回空列表
+        """
+        # 构建 pgrep 命令
+        cmd_parts = ["pgrep"]
+
+        # 如果不区分大小写，添加 -i 参数
+        if not case_sensitive:
+            cmd_parts.append("-i")
+
+        # 使用 -f 参数可以匹配完整命令行，但这里只匹配进程名
+        # 直接使用进程名，pgrep 默认匹配进程名
+        cmd_parts.append(process_name)
+
+        cmd = " ".join(cmd_parts)
+        logger.debug(f"执行命令: {cmd}")
+
+        success, output = self.ssh_tool.run_cmd(cmd)
+
+        if success and output.strip():
+            # 解析输出，获取所有PID
+            pids = []
+            for line in output.strip().split("\n"):
+                line = line.strip()
+                if line:
+                    try:
+                        pid = int(line)
+                        pids.append(pid)
+                    except ValueError:
+                        logger.warning(f"无法解析PID: {line}")
+                        continue
+
+            logger.info(f"找到进程 {process_name} 的PID: {pids}")
+            return pids
+        else:
+            # pgrep 在找不到进程时返回非零退出码，这是正常情况
+            logger.debug(f"未找到进程: {process_name}")
+            return []
+
+    def get_open_ports_info(self) -> list[dict[str, str | int]]:
+        """获取所有已开放的端口
+
+        Returns:
+            list[dict]: 端口信息列表，每个字典包含以下字段：
+                - port: 端口号 (int)
+                - protocol: 协议类型，'tcp' 或 'udp' (str)
+                - state: 连接状态，如 'LISTEN', 'ESTABLISHED' 等 (str)
+                - local_address: 本地地址 (str)
+                - foreign_address: 远程地址（如果有）(str)
+        """
+        ports_info = []
+
+        # 优先使用 ss 命令（更现代、更快）
+        # ss -tuln 显示所有监听的TCP和UDP端口
+        # -t: TCP
+        # -u: UDP
+        # -l: 只显示监听状态的端口
+        # -n: 以数字形式显示地址和端口
+        cmd = "ss -tuln"
+        logger.debug(f"执行命令: {cmd}")
+
+        success, output = self.ssh_tool.run_cmd(cmd)
+
+        if success and output.strip():
+            # 解析 ss 命令输出
+            # 格式示例：
+            # Netid State  Recv-Q Send-Q Local Address:Port Peer Address:Port
+            # tcp   LISTEN 0      128    0.0.0.0:22        0.0.0.0:*
+            lines = output.strip().split("\n")
+
+            for line in lines[1:]:  # 跳过标题行
+                line = line.strip()
+                if not line:
+                    continue
+
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+
+                try:
+                    protocol = parts[0].lower()  # tcp, udp, tcp6, udp6
+                    state = parts[1]
+                    local_addr_port = parts[4]
+
+                    # 解析本地地址和端口
+                    if ":" in local_addr_port:
+                        local_address, port_str = local_addr_port.rsplit(":", 1)
+                        # 处理 IPv6 地址（可能包含多个冒号）
+                        if local_addr_port.count(":") > 1 and not local_addr_port.startswith("::"):
+                            # IPv6 地址，找到最后一个冒号
+                            last_colon = local_addr_port.rfind(":")
+                            local_address = local_addr_port[:last_colon]
+                            port_str = local_addr_port[last_colon + 1 :]
+
+                        try:
+                            port = int(port_str)
+
+                            # 解析远程地址（如果有）
+                            foreign_address = ""
+                            if len(parts) > 5:
+                                foreign_address = parts[5]
+
+                            port_info = {
+                                "port": port,
+                                "protocol": protocol.replace("6", ""),  # tcp6 -> tcp, udp6 -> udp
+                                "state": state,
+                                "local_address": local_address,
+                                "foreign_address": foreign_address if foreign_address else "",
+                            }
+                            ports_info.append(port_info)
+                        except ValueError:
+                            logger.warning(f"无法解析端口号: {port_str}")
+                            continue
+                except (IndexError, ValueError) as e:
+                    logger.warning(f"解析端口信息失败: {line}, 错误: {e}")
+                    continue
+
+        # 如果 ss 命令失败，尝试使用 netstat 作为备选
+        if not success or not ports_info:
+            logger.debug("ss 命令失败或未找到端口，尝试使用 netstat...")
+            cmd = "netstat -tuln"
+            success, output = self.ssh_tool.run_cmd(cmd)
+
+            if success and output.strip():
+                lines = output.strip().split("\n")
+
+                for line in lines[2:]:  # 跳过标题行
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    parts = line.split()
+                    if len(parts) < 4:
+                        continue
+
+                    try:
+                        protocol = parts[0].lower()
+                        if protocol not in ["tcp", "udp", "tcp6", "udp6"]:
+                            continue
+
+                        local_addr_port = parts[3]
+
+                        # 解析本地地址和端口
+                        if ":" in local_addr_port:
+                            local_address, port_str = local_addr_port.rsplit(":", 1)
+
+                            # 处理 IPv6
+                            if local_addr_port.count(":") > 1 and not local_addr_port.startswith("::"):
+                                last_colon = local_addr_port.rfind(":")
+                                local_address = local_addr_port[:last_colon]
+                                port_str = local_addr_port[last_colon + 1 :]
+
+                            try:
+                                port = int(port_str)
+
+                                state = ""
+                                foreign_address = ""
+                                if len(parts) > 4:
+                                    if protocol.startswith("tcp"):
+                                        state = parts[5] if len(parts) > 5 else ""
+                                        foreign_address = parts[4] if len(parts) > 4 else ""
+                                    else:
+                                        foreign_address = parts[4] if len(parts) > 4 else ""
+
+                                port_info = {
+                                    "port": port,
+                                    "protocol": protocol.replace("6", ""),
+                                    "state": state,
+                                    "local_address": local_address,
+                                    "foreign_address": foreign_address if foreign_address else "",
+                                }
+                                ports_info.append(port_info)
+                            except ValueError:
+                                logger.warning(f"无法解析端口号: {port_str}")
+                                continue
+                    except (IndexError, ValueError) as e:
+                        logger.warning(f"解析端口信息失败: {line}, 错误: {e}")
+                        continue
+
+        # 去重（同一个端口可能同时监听 IPv4 和 IPv6）
+        seen_ports = set()
+        unique_ports_info = []
+        for port_info in ports_info:
+            key = (port_info["port"], port_info["protocol"])
+            if key not in seen_ports:
+                seen_ports.add(key)
+                unique_ports_info.append(port_info)
+
+        logger.info(f"找到 {len(unique_ports_info)} 个开放的端口")
+        return unique_ports_info
+
+    def get_process_list(self) -> list[dict[str, str | int | float]]:
+        """获取进程列表
+
+        Returns:
+            list[dict]: 进程信息列表，每个字典包含以下字段：
+                - pid: 进程ID (int)
+                - name: 进程名称 (str)
+                - cpu_percent: CPU使用率百分比 (float)
+                - mem_percent: 内存使用率百分比 (float)
+                - user: 运行用户 (str)
+                - vsz: 虚拟内存大小，单位KB (int)
+                - rss: 物理内存大小，单位KB (int)
+                - stat: 进程状态 (str)
+                - start: 启动时间 (str)
+                - time: CPU时间 (str)
+                - command: 完整命令 (str)
+        """
+        process_list = []
+
+        # 使用 ps 命令获取进程信息
+        # ps aux 显示所有进程的详细信息
+        # 或者使用 ps -eo 指定格式
+        cmd = "ps aux"
+        logger.debug(f"执行命令: {cmd}")
+
+        success, output = self.ssh_tool.run_cmd(cmd)
+
+        if success and output.strip():
+            lines = output.strip().split("\n")
+
+            for line in lines[1:]:  # 跳过标题行
+                line = line.strip()
+                if not line:
+                    continue
+
+                # ps aux 输出格式：
+                # USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+                # root         1  0.0  0.1  12345  1234 ?        Ss   Jan01   0:01 /sbin/init
+                parts = line.split(None, 10)  # 最多分割10次，保留命令部分
+
+                if len(parts) < 11:
+                    # 如果命令部分为空或格式不标准，尝试其他解析方式
+                    continue
+
+                try:
+                    user = parts[0]
+                    pid = int(parts[1])
+                    cpu_percent = float(parts[2])
+                    mem_percent = float(parts[3])
+                    vsz = int(parts[4]) if parts[4].isdigit() else 0
+                    rss = int(parts[5]) if parts[5].isdigit() else 0
+                    tty = parts[6]
+                    stat = parts[7]
+                    start = parts[8]
+                    time = parts[9]
+                    command = parts[10] if len(parts) > 10 else ""
+
+                    # 提取进程名称（命令的第一部分）
+                    process_name = command.split()[0] if command else ""
+                    # 去掉路径，只保留文件名
+                    if "/" in process_name:
+                        process_name = process_name.split("/")[-1]
+
+                    process_info = {
+                        "pid": pid,
+                        "name": process_name,
+                        "cpu_percent": cpu_percent,
+                        "mem_percent": mem_percent,
+                        "user": user,
+                        "vsz": vsz,
+                        "rss": rss,
+                        "stat": stat,
+                        "start": start,
+                        "time": time,
+                        "command": command,
+                    }
+                    process_list.append(process_info)
+                except (ValueError, IndexError) as e:
+                    logger.warning(f"解析进程信息失败: {line}, 错误: {e}")
+                    continue
+
+        logger.info(f"获取到 {len(process_list)} 个进程")
+        return process_list
+
+    def open_port(self, port: int, protocol: str = "tcp") -> bool:
+        """开放端口
+
+        Args:
+            port: 端口号
+            protocol: 协议类型，'tcp' 或 'udp'，默认 'tcp'
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        protocol = protocol.lower()
+        if protocol not in ["tcp", "udp"]:
+            logger.error(f"不支持的协议类型: {protocol}，仅支持 'tcp' 或 'udp'")
+            return False
+
+        # 优先使用 firewalld（CentOS 7+ 默认）
+        # 检查 firewalld 是否运行
+        success, output = self.ssh_tool.run_cmd("systemctl is-active firewalld")
+        if success and output.strip() == "active":
+            # 使用 firewalld 开放端口
+            cmd = f"firewall-cmd --permanent --add-port={port}/{protocol}"
+            logger.info(f"执行命令: {cmd}")
+            success, output = self.ssh_tool.run_cmd(cmd)
+
+            if success:
+                # 重新加载防火墙配置
+                reload_cmd = "firewall-cmd --reload"
+                logger.debug(f"重新加载防火墙配置: {reload_cmd}")
+                reload_success, reload_output = self.ssh_tool.run_cmd(reload_cmd)
+                if reload_success:
+                    logger.info(f"成功开放端口: {port}/{protocol}")
+                    return True
+                else:
+                    logger.error(f"重新加载防火墙配置失败: {reload_output}")
+                    return False
+            else:
+                logger.warning(f"firewalld 开放端口失败，尝试使用 iptables: {output}")
+
+        # 使用 iptables 作为备选方案
+        logger.debug("使用 iptables 开放端口...")
+        # 检查端口是否已经开放
+        check_cmd = f"iptables -C INPUT -p {protocol} --dport {port} -j ACCEPT 2>&1"
+        check_success, _ = self.ssh_tool.run_cmd(check_cmd)
+
+        if check_success:
+            logger.info(f"端口 {port}/{protocol} 已经开放")
+            return True
+
+        # 添加 iptables 规则
+        cmd = f"iptables -A INPUT -p {protocol} --dport {port} -j ACCEPT"
+        logger.info(f"执行命令: {cmd}")
+        success, output = self.ssh_tool.run_cmd(cmd)
+
+        if success:
+            # 保存 iptables 规则（根据不同的系统使用不同的命令）
+            save_cmd = "iptables-save > /etc/sysconfig/iptables 2>&1 || service iptables save 2>&1 || true"
+            self.ssh_tool.run_cmd(save_cmd)
+            logger.info(f"成功开放端口: {port}/{protocol}")
+            return True
+        else:
+            logger.error(f"开放端口失败: {port}/{protocol}, 错误: {output}")
+            return False
+
+    def close_port(self, port: int, protocol: str = "tcp") -> bool:
+        """关闭端口
+
+        Args:
+            port: 端口号
+            protocol: 协议类型，'tcp' 或 'udp'，默认 'tcp'
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        protocol = protocol.lower()
+        if protocol not in ["tcp", "udp"]:
+            logger.error(f"不支持的协议类型: {protocol}，仅支持 'tcp' 或 'udp'")
+            return False
+
+        # 优先使用 firewalld（CentOS 7+ 默认）
+        # 检查 firewalld 是否运行
+        success, output = self.ssh_tool.run_cmd("systemctl is-active firewalld")
+        if success and output.strip() == "active":
+            # 使用 firewalld 关闭端口
+            cmd = f"firewall-cmd --permanent --remove-port={port}/{protocol}"
+            logger.info(f"执行命令: {cmd}")
+            success, output = self.ssh_tool.run_cmd(cmd)
+
+            if success:
+                # 重新加载防火墙配置
+                reload_cmd = "firewall-cmd --reload"
+                logger.debug(f"重新加载防火墙配置: {reload_cmd}")
+                reload_success, reload_output = self.ssh_tool.run_cmd(reload_cmd)
+                if reload_success:
+                    logger.info(f"成功关闭端口: {port}/{protocol}")
+                    return True
+                else:
+                    logger.error(f"重新加载防火墙配置失败: {reload_output}")
+                    return False
+            else:
+                logger.warning(f"firewalld 关闭端口失败，尝试使用 iptables: {output}")
+
+        # 使用 iptables 作为备选方案
+        logger.debug("使用 iptables 关闭端口...")
+        # 检查端口规则是否存在
+        check_cmd = f"iptables -C INPUT -p {protocol} --dport {port} -j ACCEPT 2>&1"
+        check_success, _ = self.ssh_tool.run_cmd(check_cmd)
+
+        if not check_success:
+            logger.info(f"端口 {port}/{protocol} 未开放或已关闭")
+            return True
+
+        # 删除 iptables 规则
+        cmd = f"iptables -D INPUT -p {protocol} --dport {port} -j ACCEPT"
+        logger.info(f"执行命令: {cmd}")
+        success, output = self.ssh_tool.run_cmd(cmd)
+
+        if success:
+            # 保存 iptables 规则
+            save_cmd = "iptables-save > /etc/sysconfig/iptables 2>&1 || service iptables save 2>&1 || true"
+            self.ssh_tool.run_cmd(save_cmd)
+            logger.info(f"成功关闭端口: {port}/{protocol}")
+            return True
+        else:
+            logger.error(f"关闭端口失败: {port}/{protocol}, 错误: {output}")
+            return False
+
     def install_soft(self, linux_soft: LinuxSoft | str) -> bool:
         """安装软件"""
         if isinstance(linux_soft, LinuxSoft):
@@ -348,4 +902,5 @@ class LinuxEnv:
 
 if __name__ == "__main__":
     linux_env = LinuxEnv(ip="192.168.137.220", username="root", password="root")
-    linux_env.get_system_info()
+    res = linux_env.get_open_ports_info()
+    print(json.dumps(res, indent=4))
