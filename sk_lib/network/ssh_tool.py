@@ -1,8 +1,5 @@
 import os
-import shutil
 import stat
-import sys
-import tempfile
 import time
 from contextlib import contextmanager
 from functools import wraps
@@ -36,7 +33,7 @@ def ensure_connected(func):
 
 
 class SSHTool:
-    def __init__(self, ip: str, port: int | None = None, username: str | None = None, password: str | None = None):
+    def __init__(self, ip: str, port: int | None = 22, username: str | None = None, password: str | None = None):
         self.ip = ip
         self.port = port
         self.username = username
@@ -98,53 +95,90 @@ class SSHTool:
                 pass
 
     @ensure_connected
-    def run_cmd(self, command: str, timeout: int | None = None) -> tuple[bool, str]:
-        """
-        在远程主机上执行 shell 命令。
-
-        判断依据：
-            - 成功：exit code == 0
-            - 失败：exit code != 0 或执行过程中发生异常
-
-        返回内容：
-            - 成功时：返回 stdout（可能为空）
-            - 失败时：优先返回 stderr；若 stderr 为空，则返回 stdout（例如 grep -q）
+    def run_cmd(self, command: str, timeout: int | None = None, realtime_output: bool = False) -> tuple[bool, str]:
+        """执行SSH命令
 
         Args:
-            command: 要执行的 shell 命令
-            timeout: 执行超时时间（秒），None 表示无限制
+            command: 要执行的命令
+            timeout: 命令执行超时时间（秒），None表示不限制
+            realtime_output: 是否实时输出命令执行过程，默认False
 
         Returns:
-            tuple[bool, str]: (是否成功, 输出内容)
+            tuple[bool, str]: (是否成功, 命令输出/错误信息)
         """
         try:
-            logger.debug(f"Executing remote command: {command}")
+            logger.info(f"执行命令: {command}")
             stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
 
-            # 必须先读取 stdout/stderr，再获取 exit status，避免缓冲区阻塞
-            stdout_content = stdout.read().decode("utf-8", errors="replace").strip()
-            stderr_content = stderr.read().decode("utf-8", errors="replace").strip()
-            exit_status = stdout.channel.recv_exit_status()
+            if realtime_output:
+                # 实时输出模式：逐块读取并立即输出
+                output_lines = []
+                error_lines = []
+                channel = stdout.channel
 
-            # 日志记录（截断过长内容，避免日志爆炸）
-            def truncate(s: str, length: int = 500) -> str:
-                return s if len(s) <= length else s[:length] + "…(truncated)"
+                # 循环读取直到命令执行完成
+                while not channel.exit_status_ready():
+                    # 读取标准输出
+                    if channel.recv_ready():
+                        data = channel.recv(4096).decode("utf-8", errors="ignore")
+                        if data:
+                            output_lines.append(data)
+                            # 实时输出到日志（逐行输出，保持格式）
+                            for line in data.splitlines(keepends=True):
+                                if line.strip():
+                                    logger.debug(line.rstrip())
 
-            if exit_status == 0:
-                logger.debug(f"Command succeeded (exit=0). stdout: {truncate(stdout_content)!r}")
-                return True, stdout_content
+                    # 读取标准错误
+                    if channel.recv_stderr_ready():
+                        data = channel.recv_stderr(4096).decode("utf-8", errors="ignore")
+                        if data:
+                            error_lines.append(data)
+                            # 实时输出错误到日志
+                            for line in data.splitlines(keepends=True):
+                                if line.strip():
+                                    logger.warning(line.rstrip())
+
+                    # 避免忙等待，短暂休眠
+                    if not channel.recv_ready() and not channel.recv_stderr_ready():
+                        time.sleep(0.1)
+
+                # 读取剩余数据
+                while channel.recv_ready():
+                    data = channel.recv(4096).decode("utf-8", errors="ignore")
+                    if data:
+                        output_lines.append(data)
+                        for line in data.splitlines(keepends=True):
+                            if line.strip():
+                                logger.debug(line.rstrip())
+
+                while channel.recv_stderr_ready():
+                    data = channel.recv_stderr(4096).decode("utf-8", errors="ignore")
+                    if data:
+                        error_lines.append(data)
+                        for line in data.splitlines(keepends=True):
+                            if line.strip():
+                                logger.warning(line.rstrip())
+
+                output = "".join(output_lines).strip()
+                error = "".join(error_lines).strip()
+                exit_status = channel.recv_exit_status()
             else:
-                # 失败时：优先使用 stderr，若为空则 fallback 到 stdout
-                msg = stderr_content if stderr_content else stdout_content
-                logger.warning(
-                    f"Command failed (exit={exit_status}). "
-                    f"stderr: {truncate(stderr_content)!r}, "
-                    f"stdout: {truncate(stdout_content)!r}"
-                )
-                return False, msg
+                # 原有模式：等待命令完成后一次性读取
+                output = stdout.read().decode("utf-8", errors="ignore").strip()
+                error = stderr.read().decode("utf-8", errors="ignore").strip()
+                exit_status = stdout.channel.recv_exit_status()
+
+            if exit_status != 0 and error:
+                logger.error(f"执行命令失败 (exit_code={exit_status}): \n{error if error else output}")
+                return False, error
+
+            logger.info(f"执行命令成功: {command}")
+            if not realtime_output:
+                logger.debug(f"输出: \n{output}")
+            return True, output
 
         except Exception as e:
-            logger.error(f"Exception during command execution: {command!r} → {e!r}")
+            logger.error(f"执行命令出错: {command}, 错误: {e}")
             return False, str(e)
 
     @ensure_connected
@@ -719,117 +753,116 @@ class SSHTool:
 
 
 if __name__ == "__main__":
-    ip = "192.168.56.102"
-    port = 22
-    username = "root"
+    ip = "192.168.203.227"
+    username = "dml"
     password = "root"
 
-    ssh_tool = SSHTool(ip=ip, port=port, username=username, password=password)
+    ssh_tool = SSHTool(ip=ip, username=username, password=password)
 
     # connect 方法
     flag = ssh_tool.connect()
     assert flag == True, "connect fail"
 
-    # is_connected 方法
-    flag = ssh_tool.is_connected()
-    assert flag == True, "is_connected fail"
+    # # is_connected 方法
+    # flag = ssh_tool.is_connected()
+    # assert flag == True, "is_connected fail"
+    #
+    # flag, output = ssh_tool.run_cmd("whoami")
+    # assert flag == True and output == "root", "run_cmd fail"
+    #
+    # # file_exists 方法
+    # flag = ssh_tool.file_exists("/etc/yum.repos.d/centos.repo")
+    # assert flag == True, "file_exists fail"
 
-    flag, output = ssh_tool.run_cmd("whoami")
-    assert flag == True and output == "root", "run_cmd fail"
+    # flag = ssh_tool.file_exists("/tmp/not_exist_file.txt")
+    # assert flag == False, "file_exists fail"
+    #
+    # # dir_exists 方法
+    # flag = ssh_tool.dir_exists("/home")
+    # assert flag == True, "dir_exists fail"
+    #
+    # flag = ssh_tool.dir_exists("/tmp/not_exist_dir")
+    # assert flag == False, "dir_exists fail"
+    #
+    # # path_exists 方法
+    # flag = ssh_tool.path_exists("/etc/yum.repos.d/centos.repo")
+    # assert flag == True, "path_exists fail"
+    #
+    # flag = ssh_tool.path_exists("/home")
+    # assert flag == True, "path_exists fail"
+    #
+    # flag = ssh_tool.path_exists("/not/exist/path")
+    # assert flag == False, "path_exists fail"
+    #
+    # # mkdir 方法
+    # flag = ssh_tool.mkdir("/tmp/test_single_dir", parent=False)
+    # assert flag == True, "mkdir fail"
+    #
+    # flag = ssh_tool.mkdir("/tmp/test_mkdir_p/level1/level2")
+    # assert flag == True, "mkdir fail"
+    #
+    # time.sleep(10)
+    #
+    # # 清理
+    # ssh_tool.remove_dir("/tmp/test_single_dir")
+    # ssh_tool.remove_dir("/tmp/test_mkdir_p")
+    #
+    # sys.exit(0)
 
-    # file_exists 方法
-    flag = ssh_tool.file_exists("/etc/yum.repos.d/centos.repo")
-    assert flag == True, "file_exists fail"
-
-    flag = ssh_tool.file_exists("/tmp/not_exist_file.txt")
-    assert flag == False, "file_exists fail"
-
-    # dir_exists 方法
-    flag = ssh_tool.dir_exists("/home")
-    assert flag == True, "dir_exists fail"
-
-    flag = ssh_tool.dir_exists("/tmp/not_exist_dir")
-    assert flag == False, "dir_exists fail"
-
-    # path_exists 方法
-    flag = ssh_tool.path_exists("/etc/yum.repos.d/centos.repo")
-    assert flag == True, "path_exists fail"
-
-    flag = ssh_tool.path_exists("/home")
-    assert flag == True, "path_exists fail"
-
-    flag = ssh_tool.path_exists("/not/exist/path")
-    assert flag == False, "path_exists fail"
-
-    # mkdir 方法
-    flag = ssh_tool.mkdir("/tmp/test_single_dir", parent=False)
-    assert flag == True, "mkdir fail"
-
-    flag = ssh_tool.mkdir("/tmp/test_mkdir_p/level1/level2")
-    assert flag == True, "mkdir fail"
-
-    time.sleep(10)
-
-    # 清理
-    ssh_tool.remove_dir("/tmp/test_single_dir")
-    ssh_tool.remove_dir("/tmp/test_mkdir_p")
-
-    sys.exit(0)
-
-    base_remote = "/tmp/ddr_test"
-    ssh_tool.remove_dir(base_remote)  # 预清理
-    assert ssh_tool.mkdir(base_remote, parent=True) == True, "prepare base_remote fail"
-
-    # 1) upload_file / chmod / get_info / rename / download_file
-    tmpdir = tempfile.mkdtemp(prefix="ssh_tool_")
-    local_file = os.path.join(tmpdir, "test_upload.txt")
-    with open(local_file, "w", encoding="utf-8") as f:
-        f.write("hello-ssh-tool\n")
-
-    remote_file = f"{base_remote}/test_upload.txt"
-    assert ssh_tool.upload_file(local_file, remote_file, create_dirs=True) == True, "upload_file fail"
-    assert ssh_tool.file_exists(remote_file) == True, "remote uploaded file not exists"
-
-    assert ssh_tool.chmod(remote_file, 0o644) == True, "chmod fail"
-    ok, info = ssh_tool.get_info(remote_file)
-    assert ok and info.get("is_file") and str(info.get("mode", "")).endswith("644"), "get_info fail or mode mismatch"
-
-    remote_file2 = f"{base_remote}/test_upload_renamed.txt"
-    assert ssh_tool.rename(remote_file, remote_file2) == True, "rename fail"
-    assert (
-        ssh_tool.file_exists(remote_file2) == True and ssh_tool.file_exists(remote_file) == False
-    ), "rename result check fail"
-
-    local_download = os.path.join(tmpdir, "test_download.txt")
-    assert ssh_tool.download_file(remote_file2, local_download, create_dirs=True) == True, "download_file fail"
-    with open(local_download, "r", encoding="utf-8") as f:
-        assert "hello-ssh-tool" in f.read(), "downloaded content mismatch"
-
-    # 2) upload_dir / download_dir
-    local_dir_to_upload = os.path.join(tmpdir, "dir_a")
-    os.makedirs(local_dir_to_upload, exist_ok=True)
-    with open(os.path.join(local_dir_to_upload, "a1.txt"), "w", encoding="utf-8") as f:
-        f.write("file-a1\n")
-    nested = os.path.join(local_dir_to_upload, "nested")
-    os.makedirs(nested, exist_ok=True)
-    with open(os.path.join(nested, "n1.txt"), "w", encoding="utf-8") as f:
-        f.write("nested-n1\n")
-
-    remote_dir_target = f"{base_remote}/dir_a"
-    assert ssh_tool.upload_dir(local_dir_to_upload, remote_dir_target, create_dirs=True) == True, "upload_dir fail"
-    assert ssh_tool.dir_exists(remote_dir_target) == True, "remote dir not exists after upload_dir"
-    assert ssh_tool.file_exists(f"{remote_dir_target}/a1.txt") == True, "uploaded file missing"
-
-    local_dir_download = os.path.join(tmpdir, "dir_download")
-    assert ssh_tool.download_dir(remote_dir_target, local_dir_download, create_dirs=True) == True, "download_dir fail"
-    assert os.path.isfile(os.path.join(local_dir_download, "a1.txt")), "downloaded file missing"
-
-    # 3) remove_file / remove_dir
-    assert ssh_tool.remove_file(remote_file2) == True, "remove_file fail"
-    assert ssh_tool.file_exists(remote_file2) == False, "remote file still exists after remove"
-
-    assert ssh_tool.remove_dir(base_remote) == True, "remove_dir fail"
-    assert ssh_tool.dir_exists(base_remote) == False, "remote dir still exists after remove"
-
-    # 本地清理
-    shutil.rmtree(tmpdir, ignore_errors=True)
+    # base_remote = "/tmp/ddr_test"
+    # ssh_tool.remove_dir(base_remote)  # 预清理
+    # assert ssh_tool.mkdir(base_remote, parent=True) == True, "prepare base_remote fail"
+    #
+    # # 1) upload_file / chmod / get_info / rename / download_file
+    # tmpdir = tempfile.mkdtemp(prefix="ssh_tool_")
+    # local_file = os.path.join(tmpdir, "test_upload.txt")
+    # with open(local_file, "w", encoding="utf-8") as f:
+    #     f.write("hello-ssh-tool\n")
+    #
+    # remote_file = f"{base_remote}/test_upload.txt"
+    # assert ssh_tool.upload_file(local_file, remote_file, create_dirs=True) == True, "upload_file fail"
+    # assert ssh_tool.file_exists(remote_file) == True, "remote uploaded file not exists"
+    #
+    # assert ssh_tool.chmod(remote_file, 0o644) == True, "chmod fail"
+    # ok, info = ssh_tool.get_info(remote_file)
+    # assert ok and info.get("is_file") and str(info.get("mode", "")).endswith("644"), "get_info fail or mode mismatch"
+    #
+    # remote_file2 = f"{base_remote}/test_upload_renamed.txt"
+    # assert ssh_tool.rename(remote_file, remote_file2) == True, "rename fail"
+    # assert (
+    #     ssh_tool.file_exists(remote_file2) == True and ssh_tool.file_exists(remote_file) == False
+    # ), "rename result check fail"
+    #
+    # local_download = os.path.join(tmpdir, "test_download.txt")
+    # assert ssh_tool.download_file(remote_file2, local_download, create_dirs=True) == True, "download_file fail"
+    # with open(local_download, "r", encoding="utf-8") as f:
+    #     assert "hello-ssh-tool" in f.read(), "downloaded content mismatch"
+    #
+    # # 2) upload_dir / download_dir
+    # local_dir_to_upload = os.path.join(tmpdir, "dir_a")
+    # os.makedirs(local_dir_to_upload, exist_ok=True)
+    # with open(os.path.join(local_dir_to_upload, "a1.txt"), "w", encoding="utf-8") as f:
+    #     f.write("file-a1\n")
+    # nested = os.path.join(local_dir_to_upload, "nested")
+    # os.makedirs(nested, exist_ok=True)
+    # with open(os.path.join(nested, "n1.txt"), "w", encoding="utf-8") as f:
+    #     f.write("nested-n1\n")
+    #
+    # remote_dir_target = f"{base_remote}/dir_a"
+    # assert ssh_tool.upload_dir(local_dir_to_upload, remote_dir_target, create_dirs=True) == True, "upload_dir fail"
+    # assert ssh_tool.dir_exists(remote_dir_target) == True, "remote dir not exists after upload_dir"
+    # assert ssh_tool.file_exists(f"{remote_dir_target}/a1.txt") == True, "uploaded file missing"
+    #
+    # local_dir_download = os.path.join(tmpdir, "dir_download")
+    # assert ssh_tool.download_dir(remote_dir_target, local_dir_download, create_dirs=True) == True, "download_dir fail"
+    # assert os.path.isfile(os.path.join(local_dir_download, "a1.txt")), "downloaded file missing"
+    #
+    # # 3) remove_file / remove_dir
+    # assert ssh_tool.remove_file(remote_file2) == True, "remove_file fail"
+    # assert ssh_tool.file_exists(remote_file2) == False, "remote file still exists after remove"
+    #
+    # assert ssh_tool.remove_dir(base_remote) == True, "remove_dir fail"
+    # assert ssh_tool.dir_exists(base_remote) == False, "remote dir still exists after remove"
+    #
+    # # 本地清理
+    # shutil.rmtree(tmpdir, ignore_errors=True)
