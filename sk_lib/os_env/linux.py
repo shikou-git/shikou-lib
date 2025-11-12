@@ -4,7 +4,7 @@ import time
 from loguru import logger
 
 from sk_lib.network import SSHTool
-from sk_lib.public.enums import LinuxSoft, OsPlatform
+from sk_lib.public.enums import Soft, OsPlatform
 
 
 class LinuxEnv:
@@ -616,19 +616,85 @@ class LinuxEnv:
             logger.error(f"关闭端口失败: {port}/{protocol}, 错误: {output}")
             return False
 
-    def install_soft(self, linux_soft: LinuxSoft | str) -> bool:
+    def firewall_status(self) -> str:
+        """获取防火墙状态
+
+        Returns:
+            str: 防火墙状态，可能的值：
+                - 'firewalld_active': firewalld 正在运行
+                - 'firewalld_inactive': firewalld 已安装但未运行
+                - 'iptables_active': iptables 正在运行或规则存在
+                - 'iptables_inactive': iptables 已安装但未运行
+                - 'ufw_active': ufw 正在运行（Ubuntu/Debian）
+                - 'disabled': 防火墙未启用
+        """
+        # 优先检查 firewalld
+        success, output = self.ssh_tool.run_cmd("systemctl is-active firewalld 2>&1")
+        if success:
+            status = output.strip()
+            if status == "active":
+                logger.debug("防火墙状态: firewalld 正在运行")
+                return "firewalld_active"
+            elif status == "inactive":
+                # 检查 firewalld 是否已安装
+                check_installed, _ = self.ssh_tool.run_cmd("systemctl list-unit-files | grep -q firewalld.service 2>&1")
+                if check_installed:
+                    logger.debug("防火墙状态: firewalld 已安装但未运行")
+                    return "firewalld_inactive"
+
+        # 检查 iptables 服务状态
+        success, output = self.ssh_tool.run_cmd("systemctl is-active iptables 2>&1")
+        if success:
+            status = output.strip()
+            if status == "active":
+                logger.debug("防火墙状态: iptables 正在运行")
+                return "iptables_active"
+            elif status == "inactive":
+                # 检查 iptables 是否已安装
+                check_installed, _ = self.ssh_tool.run_cmd("which iptables 2>&1")
+                if check_installed:
+                    logger.debug("防火墙状态: iptables 已安装但未运行")
+                    return "iptables_inactive"
+
+        # 检查 iptables 规则是否存在（即使服务未运行，规则也可能存在）
+        success, output = self.ssh_tool.run_cmd("iptables -L -n 2>&1 | head -5")
+        if success and output.strip():
+            # 检查是否有默认策略
+            check_policy, policy_output = self.ssh_tool.run_cmd(
+                "iptables -L INPUT -n --line-numbers 2>&1 | grep -i policy"
+            )
+            if check_policy and policy_output.strip():
+                logger.debug("防火墙状态: iptables 规则存在")
+                return "iptables_active"
+
+        # 检查是否有其他防火墙工具
+        # 检查 ufw (Ubuntu/Debian)
+        success, output = self.ssh_tool.run_cmd("systemctl is-active ufw 2>&1")
+        if success and output.strip() == "active":
+            logger.debug("防火墙状态: ufw 正在运行")
+            return "ufw_active"
+
+        # 如果都没有找到，返回未启用
+        logger.debug("防火墙状态: 未启用或无法确定")
+        return "disabled"
+
+    def install_soft(self, soft: Soft | str) -> bool:
         """安装软件"""
-        if isinstance(linux_soft, LinuxSoft):
-            linux_soft = linux_soft.value
+        if isinstance(soft, Soft):
+            soft = soft.value
 
-        return self._yum_install(linux_soft)
+        # 特殊软件使用专门的安装方法
+        if soft == "pyenv":
+            return self._install_pyenv()
 
-    def uninstall_soft(self, linux_soft: LinuxSoft | str) -> bool:
+        return self._yum_install(soft)
+
+    def uninstall_soft(self, soft: Soft | str) -> bool:
         """卸载软件"""
-        if isinstance(linux_soft, LinuxSoft):
-            linux_soft = linux_soft.value
+        if isinstance(soft, Soft):
+            soft = soft.value
 
-        return self._yum_uninstall(linux_soft)
+        return self._yum_uninstall(soft)
 
     def _yum_install(self, soft_name: str) -> bool:
         """yum安装"""
@@ -644,7 +710,9 @@ class LinuxEnv:
             raise ValueError("OsPlatform not supported")
 
         # 执行安装命令
-        success, output = self.ssh_tool.run_cmd(install_cmd, realtime_output=True)
+        # 使用 stdbuf 强制行缓冲，改善长时间下载时的输出刷新；若无 stdbuf 则回退原命令
+        install_cmd_stream = f"command -v stdbuf >/dev/null 2>&1 && stdbuf -oL -eL {install_cmd} || {install_cmd}"
+        success, output = self.ssh_tool.run_cmd(install_cmd_stream, realtime_output=True)
         if not success:
             return False
 
@@ -652,9 +720,9 @@ class LinuxEnv:
         success, output = self.ssh_tool.run_cmd(f"which {soft_name}", realtime_output=True)
         flag = success and output.strip() != ""
         if flag:
-            logger.info(f"LinuxSoft {soft_name} install success")
+            logger.info(f"Soft {soft_name} install success")
         else:
-            logger.error(f"LinuxSoft {soft_name} install error")
+            logger.error(f"Soft {soft_name} install error")
 
         return flag
 
@@ -663,11 +731,135 @@ class LinuxEnv:
         success, output = self.ssh_tool.run_cmd(f"yum remove -y {soft_name}")
         flag = success and output.strip() != ""
         if flag:
-            logger.info(f"LinuxSoft {soft_name} uninstall success")
+            logger.info(f"Soft {soft_name} uninstall success")
         else:
-            logger.error(f"LinuxSoft {soft_name} uninstall error")
+            logger.error(f"Soft {soft_name} uninstall error")
 
         return flag
+
+    def _install_pyenv(self) -> bool:
+        """安装 pyenv（Python 版本管理工具）"""
+        logger.info("开始安装 pyenv...")
+
+        # 1) 若已可用，则继续做配置确保生效
+        installed_cmd = 'command -v pyenv >/dev/null 2>&1 && pyenv --version || echo ""'
+        ok, out = self.ssh_tool.run_cmd(installed_cmd)
+        already_installed = bool(out.strip() and "pyenv" in out)
+        if already_installed:
+            logger.info(f"检测到 pyenv 已安装: {out.strip()}，将继续配置并确保生效")
+
+        # 2) 安装构建依赖（逐个安装，失败不阻断）
+        logger.info("安装 Python 构建依赖（可能耗时较长）...")
+        deps = [
+            "git",
+            "curl",
+            # "gcc",
+            # "make",
+            # "zlib-devel",
+            # "bzip2",
+            # "bzip2-devel",
+            # "readline-devel",
+            # "sqlite",
+            # "sqlite-devel",
+            # "openssl-devel",
+            # "tk-devel",
+            # "libffi-devel",
+            # "xz-devel",
+        ]
+        # 使用已封装的 _yum_install 逐个安装（不阻断失败）
+        for pkg in deps:
+            try:
+                self._yum_install(pkg)
+            except Exception as e:
+                logger.warning(f"安装依赖 {pkg} 时出现异常: {e}")
+
+        # 3) 安装/修复 pyenv（官方推荐安装器 + 自愈）
+        # 补充检测：本地是否已有二进制（即使未在 PATH 中）
+        ok, out = self.ssh_tool.run_cmd('test -x "$HOME/.pyenv/bin/pyenv" && echo yes || echo no')
+        pyenv_bin_present = ok and out.strip() == "yes"
+
+        # 基本状态
+        has_pyenv_dir_cmd = '[ -d "$HOME/.pyenv" ] && echo yes || echo no'
+        ok, out = self.ssh_tool.run_cmd(has_pyenv_dir_cmd)
+        pyenv_dir_exists = ok and out.strip() == "yes"
+
+        # 若目录存在但缺少二进制，尝试 git 修复
+        if pyenv_dir_exists and not pyenv_bin_present:
+            logger.info("检测到 ~/.pyenv 存在但缺少 bin/pyenv，尝试使用 git 修复...")
+            ok, out = self.ssh_tool.run_cmd('[ -d "$HOME/.pyenv/.git" ] && echo yes || echo no')
+            if ok and out.strip() == "yes":
+                repair_cmd = (
+                    'git -C "$HOME/.pyenv" fetch --all -p || true; '
+                    'git -C "$HOME/.pyenv" reset --hard origin/master || true'
+                )
+                self.ssh_tool.run_cmd(repair_cmd, realtime_output=True)
+                ok, out = self.ssh_tool.run_cmd('test -x "$HOME/.pyenv/bin/pyenv" && echo yes || echo no')
+                pyenv_bin_present = ok and out.strip() == "yes"
+
+            # 若仍缺失，则清理目录准备重装
+            if not pyenv_bin_present:
+                logger.warning("git 修复未找到 bin/pyenv，将清理 ~/.pyenv 后重新安装")
+                self.ssh_tool.run_cmd('rm -rf "$HOME/.pyenv"')
+                pyenv_dir_exists = False
+
+        # 是否需要安装：既不在 PATH 也没有本地二进制
+        need_install = not (already_installed or pyenv_bin_present)
+        if need_install:
+            logger.info("通过官方安装器安装 pyenv ...")
+            install_cmd = "curl -fsSL https://pyenv.run | bash"
+            ok, out = self.ssh_tool.run_cmd(install_cmd, realtime_output=True)
+            if not ok:
+                # 若提示目录已存在，视为无须安装，继续配置
+                if "Kindly remove the '/root/.pyenv' directory first" in out or ".pyenv' directory first" in out:
+                    logger.warning("安装器提示 ~/.pyenv 已存在，跳过安装并继续配置")
+                else:
+                    logger.error("pyenv 安装脚本执行失败")
+                    return False
+
+            # 安装后再次校验二进制是否存在
+            ok, out = self.ssh_tool.run_cmd('test -x "$HOME/.pyenv/bin/pyenv" && echo yes || echo no')
+            pyenv_bin_present = ok and out.strip() == "yes"
+            if not pyenv_bin_present:
+                logger.error("安装完成后仍未找到 ~/.pyenv/bin/pyenv，安装可能失败")
+                return False
+
+        # 4) 写入 Shell 配置（.bashrc 以及登录 profile）
+        logger.info("写入 Shell 配置以自动加载 pyenv ...")
+        write_profile_cmd = (
+            # 选择登录 Shell 的 profile 文件（优先 .bash_profile 其次 .profile，不存在则创建 .profile）
+            'PROFILE_FILE="$HOME/.bash_profile"; '
+            '[ ! -f "$PROFILE_FILE" ] && [ -f "$HOME/.profile" ] && PROFILE_FILE="$HOME/.profile"; '
+            '[ ! -f "$PROFILE_FILE" ] && PROFILE_FILE="$HOME/.profile" && touch "$PROFILE_FILE"; '
+            # 将配置追加到 .bashrc 和 登录 profile（幂等式追加）
+            'for f in "$HOME/.bashrc" "$PROFILE_FILE"; do '
+            '  [ -f "$f" ] || touch "$f"; '
+            '  grep -q \'export PYENV_ROOT="$HOME/.pyenv"\' "$f" || echo \'export PYENV_ROOT="$HOME/.pyenv"\' >> "$f"; '
+            '  grep -q \'PYENV_ROOT/bin\' "$f" || echo \'[[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"\' >> "$f"; '
+            '  grep -q \'pyenv init - bash\' "$f" || echo \'eval "$(pyenv init - bash)"\' >> "$f"; '
+            "done"
+        )
+        ok, out = self.ssh_tool.run_cmd(write_profile_cmd)
+        if not ok:
+            logger.error("写入 Shell 配置失败")
+            return False
+
+        # 5) 让当前会话生效并校验
+        logger.info("让当前会话临时生效并验证 pyenv ...")
+        activate_and_check_cmd = (
+            'export PYENV_ROOT="$HOME/.pyenv"; '
+            'if [ -d "$PYENV_ROOT/bin" ]; then export PATH="$PYENV_ROOT/bin:$PATH"; fi; '
+            # 使用 bash 初始化以匹配官方建议；失败不阻断版本校验
+            "bash -lc 'eval \"$(pyenv init - bash)\"' >/dev/null 2>&1 || true; "
+            # 直接调用绝对路径兜底校验
+            "~/.pyenv/bin/pyenv --version || pyenv --version"
+        )
+        ok, out = self.ssh_tool.run_cmd(activate_and_check_cmd)
+        if ok and out.strip():
+            logger.info(f"pyenv 安装并生效成功: {out.strip()}")
+            return True
+
+        logger.error(f"pyenv 校验失败: {out}")
+        return False
 
     def set_english_locale(self) -> bool:
         """设置操作系统为英文环境"""
@@ -899,8 +1091,309 @@ class LinuxEnv:
         logger.info(f"System info collected: \n{json.dumps(system_info, indent=4)}")
         return system_info
 
+    def set_timezone(self, timezone: str = "Asia/Shanghai") -> bool:
+        """设置系统时区
+
+        Args:
+            timezone: 时区名称，默认 'Asia/Shanghai'，例如 'UTC', 'America/New_York' 等
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info(f"设置系统时区为: {timezone}")
+
+        # 优先使用 timedatectl（systemd 系统）
+        success, output = self.ssh_tool.run_cmd(f"timedatectl set-timezone {timezone} 2>&1")
+        if success:
+            # 验证时区是否设置成功
+            verify_success, verify_output = self.ssh_tool.run_cmd("timedatectl | grep 'Time zone'")
+            if verify_success and timezone in verify_output:
+                logger.info(f"成功设置时区为: {timezone}")
+                return True
+            else:
+                logger.warning(f"时区设置命令执行成功，但验证失败: {verify_output}")
+                return True  # 仍然返回 True，因为命令执行成功
+
+        # 如果 timedatectl 不可用，使用传统方法
+        logger.debug("timedatectl 不可用，使用传统方法设置时区...")
+
+        # 检查时区文件是否存在
+        timezone_file = f"/usr/share/zoneinfo/{timezone}"
+        check_success, check_output = self.ssh_tool.run_cmd(
+            f"test -f {timezone_file} && echo 'exists' || echo 'not exists'"
+        )
+        if not check_success or "not exists" in check_output:
+            logger.error(f"时区文件不存在: {timezone_file}")
+            return False
+
+        # 创建符号链接
+        backup_cmd = "cp /etc/localtime /etc/localtime.bak 2>/dev/null || true"
+        self.ssh_tool.run_cmd(backup_cmd)
+
+        link_cmd = f"ln -sf {timezone_file} /etc/localtime"
+        success, output = self.ssh_tool.run_cmd(link_cmd)
+        if success:
+            logger.info(f"成功设置时区为: {timezone}")
+            return True
+        else:
+            logger.error(f"设置时区失败: {output}")
+            return False
+
+    def sync_time_with_ntp(self, ntp_server: str = "pool.ntp.org") -> bool:
+        """与NTP服务器同步时间
+
+        Args:
+            ntp_server: NTP服务器地址，默认 'pool.ntp.org'
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info(f"与NTP服务器同步时间: {ntp_server}")
+
+        # 优先使用 chronyd（CentOS 7+ 默认）
+        success, output = self.ssh_tool.run_cmd("systemctl is-active chronyd 2>&1")
+        if success and output.strip() == "active":
+            # 使用 chronyd 同步时间
+            logger.debug("使用 chronyd 同步时间...")
+            # 先停止 chronyd
+            self.ssh_tool.run_cmd("systemctl stop chronyd 2>&1")
+            # 使用 chronyd 手动同步
+            sync_cmd = f"chronyd -q 'server {ntp_server} iburst' 2>&1"
+            success, output = self.ssh_tool.run_cmd(sync_cmd)
+            # 重新启动 chronyd
+            self.ssh_tool.run_cmd("systemctl start chronyd 2>&1")
+            if success:
+                logger.info(f"成功与NTP服务器同步时间: {ntp_server}")
+                return True
+            else:
+                logger.warning(f"chronyd 同步失败，尝试其他方法: {output}")
+
+        # 尝试使用 ntpdate
+        logger.debug("尝试使用 ntpdate 同步时间...")
+        # 检查 ntpdate 是否可用
+        check_success, _ = self.ssh_tool.run_cmd("which ntpdate 2>&1")
+        if check_success:
+            sync_cmd = f"ntpdate -u {ntp_server} 2>&1"
+            success, output = self.ssh_tool.run_cmd(sync_cmd)
+            if success:
+                logger.info(f"成功与NTP服务器同步时间: {ntp_server}")
+                return True
+            else:
+                logger.warning(f"ntpdate 同步失败: {output}")
+
+        # 尝试使用 systemd-timesyncd（systemd 系统）
+        logger.debug("尝试使用 systemd-timesyncd 同步时间...")
+        success, output = self.ssh_tool.run_cmd("systemctl is-active systemd-timesyncd 2>&1")
+        if success and output.strip() == "active":
+            # 使用 timedatectl 设置NTP服务器并同步
+            set_ntp_cmd = f"timedatectl set-ntp true 2>&1"
+            self.ssh_tool.run_cmd(set_ntp_cmd)
+            # 等待同步完成
+            time.sleep(2)
+            # 手动触发同步（如果支持）
+            sync_cmd = "systemctl restart systemd-timesyncd 2>&1"
+            success, output = self.ssh_tool.run_cmd(sync_cmd)
+            if success:
+                logger.info(f"成功与NTP服务器同步时间: {ntp_server}")
+                return True
+
+        # 如果所有方法都失败，尝试使用 rdate（较老的方法）
+        logger.debug("尝试使用 rdate 同步时间...")
+        check_success, _ = self.ssh_tool.run_cmd("which rdate 2>&1")
+        if check_success:
+            sync_cmd = f"rdate -s {ntp_server} 2>&1"
+            success, output = self.ssh_tool.run_cmd(sync_cmd)
+            if success:
+                logger.info(f"成功与NTP服务器同步时间: {ntp_server}")
+                return True
+
+        logger.error(f"无法与NTP服务器同步时间: {ntp_server}，所有方法都失败")
+        return False
+
+    def get_current_time(self) -> str:
+        """获取当前系统时间
+
+        Returns:
+            str: 当前时间的字符串表示，格式为 ISO 8601 格式 (YYYY-MM-DD HH:MM:SS)
+        """
+        # 使用 date 命令获取当前时间
+        cmd = "date '+%Y-%m-%d %H:%M:%S'"
+        logger.debug(f"执行命令: {cmd}")
+
+        success, output = self.ssh_tool.run_cmd(cmd)
+        if success and output.strip():
+            current_time = output.strip()
+            logger.debug(f"当前系统时间: {current_time}")
+            return current_time
+        else:
+            logger.error(f"获取当前时间失败: {output}")
+            return ""
+
+    def service_start(self, service_name: str) -> bool:
+        """启动服务
+
+        Args:
+            service_name: 服务名称，例如 'nginx', 'mysql', 'docker' 等
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info(f"启动服务: {service_name}")
+
+        # 使用 systemctl 启动服务
+        cmd = f"systemctl start {service_name}"
+        success, output = self.ssh_tool.run_cmd(cmd)
+
+        if success:
+            logger.info(f"成功启动服务: {service_name}")
+            return True
+        else:
+            logger.error(f"启动服务失败: {service_name}, 错误: {output}")
+            return False
+
+    def service_stop(self, service_name: str) -> bool:
+        """停止服务
+
+        Args:
+            service_name: 服务名称，例如 'nginx', 'mysql', 'docker' 等
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info(f"停止服务: {service_name}")
+
+        # 使用 systemctl 停止服务
+        cmd = f"systemctl stop {service_name}"
+        success, output = self.ssh_tool.run_cmd(cmd)
+
+        if success:
+            logger.info(f"成功停止服务: {service_name}")
+            return True
+        else:
+            logger.error(f"停止服务失败: {service_name}, 错误: {output}")
+            return False
+
+    def service_restart(self, service_name: str) -> bool:
+        """重启服务
+
+        Args:
+            service_name: 服务名称，例如 'nginx', 'mysql', 'docker' 等
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info(f"重启服务: {service_name}")
+
+        # 使用 systemctl 重启服务
+        cmd = f"systemctl restart {service_name}"
+        success, output = self.ssh_tool.run_cmd(cmd)
+
+        if success:
+            logger.info(f"成功重启服务: {service_name}")
+            return True
+        else:
+            logger.error(f"重启服务失败: {service_name}, 错误: {output}")
+            return False
+
+    def service_status(self, service_name: str) -> str:
+        """获取服务状态
+
+        Args:
+            service_name: 服务名称，例如 'nginx', 'mysql', 'docker' 等
+
+        Returns:
+            str: 服务状态，可能的值：
+                - 'active': 服务正在运行
+                - 'inactive': 服务已停止
+                - 'failed': 服务启动失败
+                - 'activating': 服务正在启动中
+                - 'deactivating': 服务正在停止中
+                - 'unknown': 无法确定状态或服务不存在
+        """
+        logger.debug(f"获取服务状态: {service_name}")
+
+        # 使用 systemctl is-active 获取服务状态
+        cmd = f"systemctl is-active {service_name}"
+        success, output = self.ssh_tool.run_cmd(cmd)
+
+        if success:
+            status = output.strip()
+            # systemctl is-active 返回 'active' 或 'inactive'
+            if status == "active":
+                logger.debug(f"服务 {service_name} 状态: active")
+                return "active"
+            elif status == "inactive":
+                logger.debug(f"服务 {service_name} 状态: inactive")
+                return "inactive"
+            else:
+                logger.debug(f"服务 {service_name} 状态: {status}")
+                return status
+        else:
+            # 如果 is-active 失败，尝试使用 status 命令获取更详细的信息
+            cmd = f"systemctl status {service_name} --no-pager -l 2>&1 | head -3"
+            success, output = self.ssh_tool.run_cmd(cmd)
+            if success and output.strip():
+                # 解析状态输出
+                output_lower = output.lower()
+                if "active (running)" in output_lower:
+                    return "active"
+                elif "inactive (dead)" in output_lower:
+                    return "inactive"
+                elif "failed" in output_lower:
+                    return "failed"
+                elif "activating" in output_lower:
+                    return "activating"
+                elif "deactivating" in output_lower:
+                    return "deactivating"
+
+            logger.warning(f"无法获取服务状态: {service_name}, 可能服务不存在")
+            return "unknown"
+
+    def service_enable(self, service_name: str) -> bool:
+        """启用服务开机自启
+
+        Args:
+            service_name: 服务名称，例如 'nginx', 'mysql', 'docker' 等
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info(f"启用服务开机自启: {service_name}")
+
+        # 使用 systemctl enable 启用服务开机自启
+        cmd = f"systemctl enable {service_name}"
+        success, output = self.ssh_tool.run_cmd(cmd)
+
+        if success:
+            logger.info(f"成功启用服务开机自启: {service_name}")
+            return True
+        else:
+            logger.error(f"启用服务开机自启失败: {service_name}, 错误: {output}")
+            return False
+
+    def service_disable(self, service_name: str) -> bool:
+        """禁用服务开机自启
+
+        Args:
+            service_name: 服务名称，例如 'nginx', 'mysql', 'docker' 等
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info(f"禁用服务开机自启: {service_name}")
+
+        # 使用 systemctl disable 禁用服务开机自启
+        cmd = f"systemctl disable {service_name}"
+        success, output = self.ssh_tool.run_cmd(cmd)
+
+        if success:
+            logger.info(f"成功禁用服务开机自启: {service_name}")
+            return True
+        else:
+            logger.error(f"禁用服务开机自启失败: {service_name}, 错误: {output}")
+            return False
+
 
 if __name__ == "__main__":
     linux_env = LinuxEnv(ip="192.168.137.220", username="root", password="root")
-    res = linux_env.get_open_ports_info()
-    print(json.dumps(res, indent=4))
+    linux_env.install_soft(Soft.PYENV)

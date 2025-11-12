@@ -1,11 +1,12 @@
 from enum import Enum
 
 
-class LinuxSoft(Enum):
+class Soft(Enum):
     """Linux软件"""
 
     DMIDECODE = "dmidecode"
     NGINX = "nginx"
+    PYENV = "pyenv"
 
 
 class OsPlatform(Enum):
