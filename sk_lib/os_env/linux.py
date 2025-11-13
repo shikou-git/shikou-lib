@@ -8,11 +8,55 @@ from sk_lib.public.enums import Soft, OsPlatform
 
 
 class LinuxEnv:
-    def __init__(
-        self, ip: str, username: str, password: str, port: int = 22, os_platform: OsPlatform = OsPlatform.Centos
-    ):
+    """当前只支持centos操作系统"""
+
+    def __init__(self, os_platform: OsPlatform, ip: str, username: str, password: str, port: int = 22):
         self.ssh_tool = SSHTool(ip, port, username, password)
-        self.os_platform = os_platform
+        if os_platform != OsPlatform.Centos.value:
+            raise ValueError(f"当前仅支持Centos操作系统")
+
+    def base_install(self) -> bool:
+        """基础环境安装
+        包括：EPEL 仓库、Git、Development Tools 编译工具组，以及系统更新
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info("开始基础环境安装...")
+
+        # 1. 安装 EPEL 仓库（推荐，提供更多软件包）
+        logger.info("安装 EPEL 仓库...")
+        if not self.install_soft("epel-release"):
+            logger.error("EPEL 仓库安装失败")
+            return False
+
+        # 2. 安装 Git（用于代码版本管理与克隆仓库）
+        logger.info("安装 Git...")
+        if not self.install_soft(Soft.GIT):
+            logger.error("Git 安装失败")
+            return False
+
+        # 3. 安装 Development Tools 组（包含 gcc、make、glibc-devel 等编译依赖）
+        logger.info("安装 Development Tools 编译工具组...")
+        # 使用 stdbuf 强制行缓冲，改善长时间下载时的输出刷新
+        group_install_cmd = "yum groupinstall -y 'Development Tools'"
+        group_install_cmd_stream = (
+            f"command -v stdbuf >/dev/null 2>&1 && stdbuf -oL -eL {group_install_cmd} || {group_install_cmd}"
+        )
+        success, output = self.ssh_tool.run_cmd(group_install_cmd_stream, realtime_output=True)
+        if not success:
+            logger.error(f"Development Tools 组安装失败: {output}")
+            return False
+        logger.info("Development Tools 组安装成功")
+
+        # 4. 更新系统包
+        logger.info("更新系统包...")
+        if not self.yum_update():
+            logger.error("系统包更新失败")
+            return False
+
+        logger.info("基础环境安装完成")
+        return True
 
     def reboot(self) -> bool:
         """重启系统"""
@@ -723,6 +767,42 @@ class LinuxEnv:
 
         return self._yum_uninstall(soft)
 
+    def clean_yum_process(self) -> bool:
+        """清理 yum 进程和锁文件
+        检查并终止正在运行的 yum 进程，清理 yum 锁文件，避免 yum 操作冲突
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info("开始清理 yum 进程和锁文件...")
+
+        # 检查并清理可能存在的 yum 进程
+        logger.info("检查是否有其他 yum 进程正在运行...")
+        pids = self.get_pids_by_name("yum", case_sensitive=False)
+        if pids:
+            logger.warning(f"发现正在运行的 yum 进程: {pids}，将强制终止...")
+            results = self.kill_process_by_pids(pids, force=True)
+            # 等待进程完全终止
+            time.sleep(2)
+            logger.info("已终止旧的 yum 进程")
+        else:
+            logger.info("未发现正在运行的 yum 进程")
+
+        # 清理 yum 锁文件（如果存在）
+        logger.info("清理 yum 锁文件...")
+        lock_files = [
+            "/var/run/yum.pid",
+            "/var/lock/subsys/yum",
+        ]
+        for lock_file in lock_files:
+            remove_cmd = f"rm -f {lock_file}"
+            success, output = self.ssh_tool.run_cmd(remove_cmd)
+            if not success:
+                logger.warning(f"清理锁文件 {lock_file} 失败: {output}")
+        logger.info("yum 锁文件清理完成")
+
+        return True
+
     def yum_update(self, package_name: str | None = None, clean_cache: bool = True) -> bool:
         """更新系统包
 
@@ -735,49 +815,24 @@ class LinuxEnv:
         """
         logger.info("开始更新系统包...")
 
-        # 检查并清理可能存在的 yum 进程和锁文件
-        logger.info("检查是否有其他 yum 进程正在运行...")
-        pids = self.get_pids_by_name("yum", case_sensitive=False)
-        if pids:
-            logger.warning(f"发现正在运行的 yum 进程: {pids}，将强制终止...")
-            results = self.kill_process_by_pids(pids, force=True)
-            # 等待进程完全终止
-            time.sleep(2)
-            logger.info("已终止旧的 yum 进程")
-
-        # 清理 yum 锁文件（如果存在）
-        logger.info("清理 yum 锁文件...")
-        lock_files = [
-            "/var/run/yum.pid",
-            "/var/lock/subsys/yum",
-        ]
-        for lock_file in lock_files:
-            remove_cmd = f"rm -f {lock_file}"
-            self.ssh_tool.run_cmd(remove_cmd)
-        logger.info("yum 锁文件清理完成")
-
         # 根据不同的操作系统平台选择更新命令
-        if self.os_platform == OsPlatform.Centos:
-            # 清理缓存（可选）
-            if clean_cache:
-                logger.info("清理 yum 缓存...")
-                clean_cmd = "yum clean all"
-                success, output = self.ssh_tool.run_cmd(clean_cmd, realtime_output=True)
-                if success:
-                    logger.info("yum 缓存清理成功")
-                else:
-                    logger.warning(f"yum 缓存清理失败: {output}")
-
-            # 构建更新命令
-            if package_name:
-                update_cmd = f"yum update -y {package_name}"
-                logger.info(f"更新指定包: {package_name}")
+        # 清理缓存（可选）
+        if clean_cache:
+            logger.info("清理 yum 缓存...")
+            clean_cmd = "yum clean all"
+            success, output = self.ssh_tool.run_cmd(clean_cmd, realtime_output=True)
+            if success:
+                logger.info("yum 缓存清理成功")
             else:
-                update_cmd = "yum update -y"
-                logger.info("更新所有包（这可能需要较长时间）...")
+                logger.warning(f"yum 缓存清理失败: {output}")
+
+        # 构建更新命令
+        if package_name:
+            update_cmd = f"yum update -y {package_name}"
+            logger.info(f"更新指定包: {package_name}")
         else:
-            logger.error("不支持的操作系统平台")
-            raise ValueError("OsPlatform not supported")
+            update_cmd = "yum update -y"
+            logger.info("更新所有包（这可能需要较长时间）...")
 
         # 执行更新命令（使用 stdbuf 强制行缓冲，实现实时输出）
         # stdbuf -oL -eL 强制标准输出和标准错误使用行缓冲
@@ -799,16 +854,12 @@ class LinuxEnv:
 
     def _yum_install(self, soft_name: str) -> bool:
         """yum安装"""
-        # 检查是否已经安装
-        success, output = self.ssh_tool.run_cmd(f"which {soft_name}")
+        # 检查是否已经安装（使用 rpm -q）
+        success, output = self.ssh_tool.run_cmd(f"rpm -q {soft_name} 2>&1")
         if success and output.strip():
             return True
 
-        # 根据不同的操作系统平台选择安装命令
-        if self.os_platform == OsPlatform.Centos:
-            install_cmd = f"yum install -y {soft_name}"
-        else:
-            raise ValueError("OsPlatform not supported")
+        install_cmd = f"yum install -y {soft_name}"
 
         # 执行安装命令
         # 使用 stdbuf 强制行缓冲，改善长时间下载时的输出刷新；若无 stdbuf 则回退原命令
@@ -817,15 +868,14 @@ class LinuxEnv:
         if not success:
             return False
 
-        # 验证安装是否成功
-        success, output = self.ssh_tool.run_cmd(f"which {soft_name}", realtime_output=True)
-        flag = success and output.strip() != ""
-        if flag:
+        # 验证安装是否成功（使用 rpm -q）
+        success, output = self.ssh_tool.run_cmd(f"rpm -q {soft_name} 2>&1", realtime_output=True)
+        if success and output.strip():
             logger.info(f"Soft {soft_name} install success")
+            return True
         else:
             logger.error(f"Soft {soft_name} install error")
-
-        return flag
+            return False
 
     def _yum_uninstall(self, soft_name: str) -> bool:
         """yum卸载"""
@@ -1805,25 +1855,4 @@ class LinuxEnv:
 
 if __name__ == "__main__":
     linux_env = LinuxEnv(ip="192.168.203.227", username="root", password="root")
-
-    # ========== 安装示例 ==========
-
-    # 示例1：安装最新版本的 pyenv（推荐，速度快）
-    # linux_env.install_soft(Soft.PYENV)
-
-    # 示例2：安装指定版本的 pyenv
-    # linux_env.install_soft(Soft.PYENV, version="v2.3.36")
-
-    # 示例3：安装最新版本的 nvm（推荐，速度快）
-    # linux_env.install_soft(Soft.NVM)
-
-    # 示例4：安装指定版本的 nvm
-    # linux_env.install_soft(Soft.NVM, version="v0.39.0")
-
-    # ========== 卸载示例 ==========
-
-    # 示例5：卸载 pyenv
-    # linux_env.uninstall_soft(Soft.PYENV)
-
-    # 示例6：卸载 nvm
-    linux_env.uninstall_soft(Soft.NVM)
+    linux_env.base_install()

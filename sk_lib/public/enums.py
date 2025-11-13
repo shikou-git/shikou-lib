@@ -8,6 +8,7 @@ class Soft(Enum):
     NGINX = "nginx"
     PYENV = "pyenv"
     NVM = "nvm"
+    GIT = "git"
 
 
 class OsPlatform(Enum):
