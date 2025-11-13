@@ -4,7 +4,7 @@ import time
 from loguru import logger
 
 from sk_lib.network import SSHTool
-from sk_lib.public.enums import Soft, OsPlatform
+from sk_lib.public.enums import OsPlatform
 
 
 class LinuxEnv:
@@ -12,8 +12,20 @@ class LinuxEnv:
 
     def __init__(self, os_platform: OsPlatform, ip: str, username: str, password: str, port: int = 22):
         self.ssh_tool = SSHTool(ip, port, username, password)
-        if os_platform != OsPlatform.Centos.value:
+        if os_platform != OsPlatform.Centos:
             raise ValueError(f"当前仅支持Centos操作系统")
+
+    def _wrap_cmd_with_stdbuf(self, cmd: str) -> str:
+        """使用 stdbuf 包装命令，强制行缓冲以实现实时输出
+        如果系统没有 stdbuf，则回退到原始命令
+
+        Args:
+            cmd: 要执行的命令
+
+        Returns:
+            str: 包装后的命令
+        """
+        return f"command -v stdbuf >/dev/null 2>&1 && stdbuf -oL -eL {cmd} || {cmd}"
 
     def base_install(self) -> bool:
         """基础环境安装
@@ -24,32 +36,30 @@ class LinuxEnv:
         """
         logger.info("开始基础环境安装...")
 
-        # 1. 安装 EPEL 仓库（推荐，提供更多软件包）
+        # 安装 EPEL 仓库（推荐，提供更多软件包）
         logger.info("安装 EPEL 仓库...")
         if not self.install_soft("epel-release"):
             logger.error("EPEL 仓库安装失败")
             return False
 
-        # 2. 安装 Git（用于代码版本管理与克隆仓库）
-        logger.info("安装 Git...")
-        if not self.install_soft(Soft.GIT):
-            logger.error("Git 安装失败")
-            return False
+        # 安装常见工具
+        common_tools = ["wget", "vim", "curl", "gzip", "tar"]
+        for tool in common_tools:
+            logger.info(f"安装 {tool}...")
+            if not self.install_soft(tool):
+                logger.error(f"{tool} 安装失败")
 
-        # 3. 安装 Development Tools 组（包含 gcc、make、glibc-devel 等编译依赖）
+        # 安装 Development Tools 组（包含 gcc、make、glibc-devel 等编译依赖）
         logger.info("安装 Development Tools 编译工具组...")
-        # 使用 stdbuf 强制行缓冲，改善长时间下载时的输出刷新
         group_install_cmd = "yum groupinstall -y 'Development Tools'"
-        group_install_cmd_stream = (
-            f"command -v stdbuf >/dev/null 2>&1 && stdbuf -oL -eL {group_install_cmd} || {group_install_cmd}"
-        )
+        group_install_cmd_stream = self._wrap_cmd_with_stdbuf(group_install_cmd)
         success, output = self.ssh_tool.run_cmd(group_install_cmd_stream, realtime_output=True)
         if not success:
             logger.error(f"Development Tools 组安装失败: {output}")
             return False
         logger.info("Development Tools 组安装成功")
 
-        # 4. 更新系统包
+        # 更新系统包
         logger.info("更新系统包...")
         if not self.yum_update():
             logger.error("系统包更新失败")
@@ -722,43 +732,33 @@ class LinuxEnv:
         logger.debug("防火墙状态: 未启用或无法确定")
         return "disabled"
 
-    def install_soft(self, soft: Soft | str, version: str | None = None) -> bool:
+    def install_soft(self, soft: str, version: str | None = None) -> bool:
         """安装软件
 
         Args:
-            soft: 软件名称或 Soft 枚举
+            soft: 软件名称
             version: 软件版本号（可选），仅对 pyenv 和 nvm 等特殊软件有效
 
         Returns:
             bool: 成功返回 True，失败返回 False
         """
-        if isinstance(soft, Soft):
-            soft = soft.value
-
         # 特殊软件使用专门的安装方法
         if soft == "pyenv":
             return self._install_pyenv(version=version)
         elif soft == "nvm":
-            # nvm 的默认版本在 _install_nvm 中定义
-            if version:
-                return self._install_nvm(version=version)
-            else:
-                return self._install_nvm()
+            return self._install_nvm(version=version)
 
         return self._yum_install(soft)
 
-    def uninstall_soft(self, soft: Soft | str) -> bool:
+    def uninstall_soft(self, soft: str) -> bool:
         """卸载软件
 
         Args:
-            soft: 软件名称或 Soft 枚举
+            soft: 软件名称
 
         Returns:
             bool: 成功返回 True，失败返回 False
         """
-        if isinstance(soft, Soft):
-            soft = soft.value
-
         # 特殊软件使用专门的卸载方法
         if soft == "pyenv":
             return self._uninstall_pyenv()
@@ -835,8 +835,7 @@ class LinuxEnv:
             logger.info("更新所有包（这可能需要较长时间）...")
 
         # 执行更新命令（使用 stdbuf 强制行缓冲，实现实时输出）
-        # stdbuf -oL -eL 强制标准输出和标准错误使用行缓冲
-        update_cmd_stream = f"command -v stdbuf >/dev/null 2>&1 && stdbuf -oL -eL {update_cmd} || {update_cmd}"
+        update_cmd_stream = self._wrap_cmd_with_stdbuf(update_cmd)
         success, output = self.ssh_tool.run_cmd(update_cmd_stream, realtime_output=True, timeout=1800)
 
         if success:
@@ -861,9 +860,8 @@ class LinuxEnv:
 
         install_cmd = f"yum install -y {soft_name}"
 
-        # 执行安装命令
-        # 使用 stdbuf 强制行缓冲，改善长时间下载时的输出刷新；若无 stdbuf 则回退原命令
-        install_cmd_stream = f"command -v stdbuf >/dev/null 2>&1 && stdbuf -oL -eL {install_cmd} || {install_cmd}"
+        # 执行安装命令（使用 stdbuf 强制行缓冲，改善长时间下载时的输出刷新）
+        install_cmd_stream = self._wrap_cmd_with_stdbuf(install_cmd)
         success, output = self.ssh_tool.run_cmd(install_cmd_stream, realtime_output=True)
         if not success:
             return False
@@ -1854,5 +1852,5 @@ class LinuxEnv:
 
 
 if __name__ == "__main__":
-    linux_env = LinuxEnv(ip="192.168.203.227", username="root", password="root")
+    linux_env = LinuxEnv(os_platform=OsPlatform.Centos, ip="192.168.203.227", username="root", password="root")
     linux_env.base_install()
