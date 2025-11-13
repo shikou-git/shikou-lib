@@ -1,5 +1,7 @@
 import json
+import os
 import time
+from datetime import datetime
 
 from loguru import logger
 
@@ -15,17 +17,11 @@ class LinuxEnv:
         if os_platform != OsPlatform.Centos:
             raise ValueError(f"当前仅支持Centos操作系统")
 
-    def _wrap_cmd_with_stdbuf(self, cmd: str) -> str:
-        """使用 stdbuf 包装命令，强制行缓冲以实现实时输出
-        如果系统没有 stdbuf，则回退到原始命令
-
-        Args:
-            cmd: 要执行的命令
-
-        Returns:
-            str: 包装后的命令
-        """
-        return f"command -v stdbuf >/dev/null 2>&1 && stdbuf -oL -eL {cmd} || {cmd}"
+    def _wrap_cmd_with_pty(self, cmd: str) -> str:
+        """使用 script 伪造 PTY，强制 yum 输出进度条"""
+        # 转义单引号，防止命令注入（简单处理）
+        safe_cmd = cmd.replace("'", "'\"'\"'")
+        return f"script -qec '{safe_cmd}' /dev/null"
 
     def base_install(self) -> bool:
         """基础环境安装
@@ -36,13 +32,23 @@ class LinuxEnv:
         """
         logger.info("开始基础环境安装...")
 
+        if not linux_env.clean_yum_process():
+            return False
+
         # 安装 EPEL 仓库（推荐，提供更多软件包）
         logger.info("安装 EPEL 仓库...")
         if not self.install_soft("epel-release"):
             logger.error("EPEL 仓库安装失败")
             return False
 
+        # 更新系统包
+        logger.info("更新系统包...")
+        if not self.yum_update():
+            logger.error("系统包更新失败")
+            return False
+
         # 安装常见工具
+        logger.info("安装常见工具...")
         common_tools = ["wget", "vim", "curl", "gzip", "tar"]
         for tool in common_tools:
             logger.info(f"安装 {tool}...")
@@ -52,18 +58,12 @@ class LinuxEnv:
         # 安装 Development Tools 组（包含 gcc、make、glibc-devel 等编译依赖）
         logger.info("安装 Development Tools 编译工具组...")
         group_install_cmd = "yum groupinstall -y 'Development Tools'"
-        group_install_cmd_stream = self._wrap_cmd_with_stdbuf(group_install_cmd)
+        group_install_cmd_stream = self._wrap_cmd_with_pty(group_install_cmd)
         success, output = self.ssh_tool.run_cmd(group_install_cmd_stream, realtime_output=True)
         if not success:
             logger.error(f"Development Tools 组安装失败: {output}")
             return False
         logger.info("Development Tools 组安装成功")
-
-        # 更新系统包
-        logger.info("更新系统包...")
-        if not self.yum_update():
-            logger.error("系统包更新失败")
-            return False
 
         logger.info("基础环境安装完成")
         return True
@@ -72,12 +72,10 @@ class LinuxEnv:
         """重启系统"""
         success, output = self.ssh_tool.run_cmd("reboot")
         if success:
-            logger.debug("Reboot system success")
+            return self.check_reboot_ok()
         else:
             logger.error(f"Reboot system error: {output}")
             return False
-
-        return True
 
     def check_reboot_ok(self, max_wait_time: int = 300, retry_interval: int = 5) -> bool:
         """检查重启是否完成
@@ -803,6 +801,227 @@ class LinuxEnv:
 
         return True
 
+    def backup_yum_repos(self, add_date: bool = True, backup_dir: str | None = None) -> bool:
+        """备份 yum.repos.d 目录下的源文件
+
+        Args:
+            add_date: 是否在备份文件名中添加日期时间戳，默认 True
+                     如果为 True，格式为：centos.repo.backup.2025_10_09_08_44_09
+                     如果为 False，格式为：centos.repo.backup
+            backup_dir: 备份目录路径，默认为 None（使用同级目录，即 /etc/yum.repos.d/）
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info("开始备份 yum.repos.d 目录下的源文件...")
+
+        repo_dir = "/etc/yum.repos.d"
+        # 如果未指定备份目录，使用同级目录
+        if backup_dir is None:
+            backup_dir = repo_dir
+        else:
+            # 确保备份目录存在
+            logger.info(f"检查备份目录是否存在: {backup_dir}")
+            mkdir_cmd = f"mkdir -p {backup_dir}"
+            success, output = self.ssh_tool.run_cmd(mkdir_cmd)
+            if not success:
+                logger.error(f"创建备份目录失败: {output}")
+                return False
+            logger.info(f"备份目录已准备: {backup_dir}")
+
+        repo_files = ["centos.repo", "centos-addons.repo"]
+
+        # 生成日期时间戳（如果需要）
+        date_suffix = ""
+        if add_date:
+            date_suffix = datetime.now().strftime(".%Y_%m_%d_%H_%M_%S")
+
+        success_count = 0
+        skipped_count = 0
+        failed_count = 0
+
+        for repo_file in repo_files:
+            source_path = f"{repo_dir}/{repo_file}"
+            backup_name = f"{repo_file}.backup{date_suffix}"
+            backup_path = f"{backup_dir}/{backup_name}"
+
+            # 检查源文件是否存在
+            logger.info(f"检查源文件是否存在: {source_path}")
+            check_cmd = f"test -f {source_path} && echo 'exists' || echo 'not_exists'"
+            success, output = self.ssh_tool.run_cmd(check_cmd)
+            if not success or output.strip() != "exists":
+                logger.warning(f"源文件 {source_path} 不存在，跳过备份")
+                skipped_count += 1
+                continue
+
+            # 复制文件
+            logger.info(f"备份 {repo_file} 到 {backup_name}...")
+            copy_cmd = f"cp {source_path} {backup_path}"
+            success, output = self.ssh_tool.run_cmd(copy_cmd)
+            if not success:
+                logger.error(f"备份 {repo_file} 失败: {output}")
+                failed_count += 1
+                continue
+
+            # 验证备份文件是否存在
+            verify_cmd = f"test -f {backup_path} && echo 'exists' || echo 'not_exists'"
+            success, output = self.ssh_tool.run_cmd(verify_cmd)
+            if success and output.strip() == "exists":
+                logger.info(f"成功备份 {repo_file} 到 {backup_name}")
+                success_count += 1
+            else:
+                logger.error(f"备份文件 {backup_path} 验证失败")
+                failed_count += 1
+
+        # 总结备份结果
+        if success_count > 0 and failed_count == 0:
+            logger.info(
+                f"备份完成：成功 {success_count} 个文件"
+                + (f"，跳过 {skipped_count} 个不存在的文件" if skipped_count > 0 else "")
+            )
+            return True
+        elif success_count > 0:
+            logger.warning(
+                f"部分备份完成：成功 {success_count} 个，失败 {failed_count} 个"
+                + (f"，跳过 {skipped_count} 个不存在的文件" if skipped_count > 0 else "")
+            )
+            return True
+        elif skipped_count == len(repo_files):
+            logger.warning("所有源文件都不存在，无需备份")
+            return True
+        else:
+            logger.error(
+                f"备份失败：失败 {failed_count} 个文件"
+                + (f"，跳过 {skipped_count} 个不存在的文件" if skipped_count > 0 else "")
+            )
+            return False
+
+    def replace_yum_repos(self, local_dir: str | None = None) -> bool:
+        """替换 yum.repos.d 目录下的源文件
+
+        Args:
+            local_dir: 本地目录路径，包含需要上传的源文件（centos.repo 和 centos-addons.repo）
+                      默认为 None，使用包内默认的阿里云源配置（sk_lib/static/repo/centos9-aliyun）
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        # 如果未指定本地目录，使用默认的 centos9-aliyun 目录
+        if local_dir is None:
+            current_file_dir = os.path.dirname(os.path.abspath(__file__))
+            local_dir = os.path.join(current_file_dir, "..", "static", "repo", "centos9-aliyun")
+            local_dir = os.path.normpath(local_dir)
+            logger.info(f"使用默认阿里云源配置: {local_dir}")
+
+        if not self.clean_yum_process():
+            return False
+
+        logger.info("开始替换 yum.repos.d 目录下的源文件...")
+
+        repo_dir = "/etc/yum.repos.d"
+        repo_files = ["centos.repo", "centos-addons.repo"]
+
+        success_count = 0
+        failed_count = 0
+
+        for repo_file in repo_files:
+            local_path = os.path.join(local_dir, repo_file)
+            remote_path = f"{repo_dir}/{repo_file}"
+
+            # 检查本地文件是否存在
+            logger.info(f"检查本地文件是否存在: {local_path}")
+            if not os.path.isfile(local_path):
+                logger.error(f"本地文件不存在: {local_path}")
+                failed_count += 1
+                continue
+
+            # 上传文件到远程
+            logger.info(f"上传 {repo_file} 到远程服务器...")
+            success = self.ssh_tool.upload_file(local_path, remote_path, create_dirs=True)
+            if not success:
+                logger.error(f"上传 {repo_file} 失败")
+                failed_count += 1
+                continue
+
+            # 验证远程文件是否存在
+            logger.info(f"验证远程文件是否存在: {remote_path}")
+            verify_cmd = f"test -f {remote_path} && echo 'exists' || echo 'not_exists'"
+            success, output = self.ssh_tool.run_cmd(verify_cmd)
+            if success and output.strip() == "exists":
+                logger.info(f"成功替换 {repo_file}")
+                success_count += 1
+            else:
+                logger.error(f"远程文件 {remote_path} 验证失败")
+                failed_count += 1
+
+        # 总结替换结果
+        if success_count == 0:
+            logger.error(f"所有源文件替换失败（失败 {failed_count} 个文件）")
+            return False
+
+        # 如果有文件成功替换，执行清理和重建缓存
+        logger.info(f"源文件替换完成（成功 {success_count} 个，失败 {failed_count} 个）")
+
+        # 清理 yum 缓存
+        logger.info("清理 yum 缓存...")
+        clean_cmd = "yum clean all"
+        clean_cmd_stream = self._wrap_cmd_with_pty(clean_cmd)
+        success, output = self.ssh_tool.run_cmd(clean_cmd_stream, realtime_output=True)
+        if not success:
+            logger.warning(f"清理 yum 缓存失败: {output}")
+        else:
+            logger.info("yum 缓存清理完成")
+
+        # 重建 yum 缓存
+        logger.info("重建 yum 缓存...")
+        makecache_cmd = "yum makecache"
+        makecache_cmd_stream = self._wrap_cmd_with_pty(makecache_cmd)
+        success, output = self.ssh_tool.run_cmd(makecache_cmd_stream, realtime_output=True)
+        if not success:
+            logger.error(f"重建 yum 缓存失败: {output}")
+            return False
+        logger.info("yum 缓存重建完成")
+
+        # 验证仓库是否生效
+        logger.info("验证仓库是否生效...")
+        repolist_cmd = "yum repolist"
+        repolist_cmd_stream = self._wrap_cmd_with_pty(repolist_cmd)
+        success, output = self.ssh_tool.run_cmd(repolist_cmd_stream, realtime_output=True)
+        if success:
+            # 检查输出中是否包含仓库信息
+            if "repo id" in output.lower() or "repolist" in output.lower():
+                logger.info("仓库验证成功，已生效")
+                logger.debug(f"仓库列表:\n{output}")
+            else:
+                logger.warning("仓库验证结果异常，但命令执行成功")
+        else:
+            logger.error(f"验证仓库失败: {output}")
+            return False
+
+        if success_count == len(repo_files):
+            logger.info("所有源文件替换并验证完成")
+        else:
+            logger.warning("部分源文件替换完成，但已执行缓存更新和验证")
+
+        return True
+
+    def restore_yum_repo(self) -> bool:
+        """恢复 yum.repos.d 目录下的源文件到默认配置
+
+        使用包内默认的源文件配置（sk_lib/static/repo/centos9-default）替换远程服务器的源文件
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        # 获取包根目录路径
+        current_file_dir = os.path.dirname(os.path.abspath(__file__))
+        # 从 sk_lib/os_env/linux.py 到 sk_lib/static/repo/centos9-default
+        repo_dir = os.path.join(current_file_dir, "..", "static", "repo", "centos9-default")
+        repo_dir = os.path.normpath(repo_dir)
+
+        logger.info(f"使用默认源文件配置恢复: {repo_dir}")
+        return self.replace_yum_repos(repo_dir)
+
     def yum_update(self, package_name: str | None = None, clean_cache: bool = True) -> bool:
         """更新系统包
 
@@ -814,6 +1033,9 @@ class LinuxEnv:
             bool: 成功返回 True，失败返回 False
         """
         logger.info("开始更新系统包...")
+
+        if not linux_env.clean_yum_process():
+            return False
 
         # 根据不同的操作系统平台选择更新命令
         # 清理缓存（可选）
@@ -835,7 +1057,7 @@ class LinuxEnv:
             logger.info("更新所有包（这可能需要较长时间）...")
 
         # 执行更新命令（使用 stdbuf 强制行缓冲，实现实时输出）
-        update_cmd_stream = self._wrap_cmd_with_stdbuf(update_cmd)
+        update_cmd_stream = self._wrap_cmd_with_pty(update_cmd)
         success, output = self.ssh_tool.run_cmd(update_cmd_stream, realtime_output=True, timeout=1800)
 
         if success:
@@ -861,7 +1083,7 @@ class LinuxEnv:
         install_cmd = f"yum install -y {soft_name}"
 
         # 执行安装命令（使用 stdbuf 强制行缓冲，改善长时间下载时的输出刷新）
-        install_cmd_stream = self._wrap_cmd_with_stdbuf(install_cmd)
+        install_cmd_stream = self._wrap_cmd_with_pty(install_cmd)
         success, output = self.ssh_tool.run_cmd(install_cmd_stream, realtime_output=True)
         if not success:
             return False
@@ -885,6 +1107,76 @@ class LinuxEnv:
             logger.error(f"Soft {soft_name} uninstall error")
 
         return flag
+
+    def download_python(self, python_version: str, download_dir: str) -> bool:
+        """下载指定版本的 Python 源码包
+
+        Args:
+            python_version: Python 版本号，例如 "3.11.0"
+            download_dir: 下载目录路径
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info(f"开始下载 Python {python_version}...")
+
+        # 构建下载 URL（使用国内镜像源 - 华为云镜像）
+        filename = f"Python-{python_version}.tgz"
+        url = f"https://mirrors.huaweicloud.com/python/{python_version}/{filename}"
+
+        # 确保下载目录存在
+        logger.info(f"检查下载目录是否存在: {download_dir}")
+        mkdir_cmd = f"mkdir -p {download_dir}"
+        success, output = self.ssh_tool.run_cmd(mkdir_cmd)
+        if not success:
+            logger.error(f"创建下载目录失败: {output}")
+            return False
+
+        # 构建下载路径
+        download_path = os.path.join(download_dir, filename).replace("\\", "/")
+
+        # 检查文件是否已存在
+        logger.info(f"检查文件是否已存在: {download_path}")
+        check_cmd = f"test -f {download_path} && echo 'exists' || echo 'not_exists'"
+        success, output = self.ssh_tool.run_cmd(check_cmd)
+        if success and output.strip() == "exists":
+            logger.info(f"文件已存在，跳过下载: {download_path}")
+            return True
+
+        # 使用 wget 下载（优先）或 curl（备用）
+        logger.info(f"开始下载: {url}")
+        logger.info(f"保存到: {download_path}")
+
+        # 尝试使用 wget
+        wget_cmd = f"wget -O {download_path} {url}"
+        wget_cmd_stream = self._wrap_cmd_with_pty(wget_cmd)
+        success, output = self.ssh_tool.run_cmd(wget_cmd_stream, realtime_output=True, timeout=600)
+
+        if not success:
+            # 如果 wget 失败，尝试使用 curl
+            logger.info("wget 下载失败，尝试使用 curl...")
+            curl_cmd = f"curl -L -o {download_path} {url}"
+            curl_cmd_stream = self._wrap_cmd_with_pty(curl_cmd)
+            success, output = self.ssh_tool.run_cmd(curl_cmd_stream, realtime_output=True, timeout=600)
+
+        if not success:
+            logger.error(f"下载 Python {python_version} 失败: {output}")
+            return False
+
+        # 验证文件是否下载成功
+        logger.info(f"验证下载文件是否存在: {download_path}")
+        verify_cmd = f"test -f {download_path} && echo 'exists' || echo 'not_exists'"
+        success, output = self.ssh_tool.run_cmd(verify_cmd)
+        if success and output.strip() == "exists":
+            # 获取文件大小
+            size_cmd = f"ls -lh {download_path} | awk '{{print $5}}'"
+            success, size_output = self.ssh_tool.run_cmd(size_cmd)
+            file_size = size_output.strip() if success else "未知"
+            logger.info(f"Python {python_version} 下载成功: {download_path} (大小: {file_size})")
+            return True
+        else:
+            logger.error(f"下载文件验证失败: {download_path}")
+            return False
 
     def _install_pyenv(self, version: str | None = None) -> bool:
         """安装 pyenv（Python 版本管理工具）
