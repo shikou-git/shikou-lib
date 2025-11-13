@@ -741,125 +741,132 @@ class LinuxEnv:
         """安装 pyenv（Python 版本管理工具）"""
         logger.info("开始安装 pyenv...")
 
-        # 1) 若已可用，则继续做配置确保生效
-        installed_cmd = 'command -v pyenv >/dev/null 2>&1 && pyenv --version || echo ""'
-        ok, out = self.ssh_tool.run_cmd(installed_cmd)
-        already_installed = bool(out.strip() and "pyenv" in out)
-        if already_installed:
-            logger.info(f"检测到 pyenv 已安装: {out.strip()}，将继续配置并确保生效")
-
-        # 2) 安装构建依赖（逐个安装，失败不阻断）
-        logger.info("安装 Python 构建依赖（可能耗时较长）...")
-        deps = [
-            "git",
-            "curl",
-            # "gcc",
-            # "make",
-            # "zlib-devel",
-            # "bzip2",
-            # "bzip2-devel",
-            # "readline-devel",
-            # "sqlite",
-            # "sqlite-devel",
-            # "openssl-devel",
-            # "tk-devel",
-            # "libffi-devel",
-            # "xz-devel",
-        ]
-        # 使用已封装的 _yum_install 逐个安装（不阻断失败）
-        for pkg in deps:
-            try:
-                self._yum_install(pkg)
-            except Exception as e:
-                logger.warning(f"安装依赖 {pkg} 时出现异常: {e}")
-
-        # 3) 安装/修复 pyenv（官方推荐安装器 + 自愈）
-        # 补充检测：本地是否已有二进制（即使未在 PATH 中）
-        ok, out = self.ssh_tool.run_cmd('test -x "$HOME/.pyenv/bin/pyenv" && echo yes || echo no')
-        pyenv_bin_present = ok and out.strip() == "yes"
-
-        # 基本状态
-        has_pyenv_dir_cmd = '[ -d "$HOME/.pyenv" ] && echo yes || echo no'
-        ok, out = self.ssh_tool.run_cmd(has_pyenv_dir_cmd)
-        pyenv_dir_exists = ok and out.strip() == "yes"
-
-        # 若目录存在但缺少二进制，尝试 git 修复
-        if pyenv_dir_exists and not pyenv_bin_present:
-            logger.info("检测到 ~/.pyenv 存在但缺少 bin/pyenv，尝试使用 git 修复...")
-            ok, out = self.ssh_tool.run_cmd('[ -d "$HOME/.pyenv/.git" ] && echo yes || echo no')
-            if ok and out.strip() == "yes":
-                repair_cmd = (
-                    'git -C "$HOME/.pyenv" fetch --all -p || true; '
-                    'git -C "$HOME/.pyenv" reset --hard origin/master || true'
-                )
-                self.ssh_tool.run_cmd(repair_cmd, realtime_output=True)
-                ok, out = self.ssh_tool.run_cmd('test -x "$HOME/.pyenv/bin/pyenv" && echo yes || echo no')
-                pyenv_bin_present = ok and out.strip() == "yes"
-
-            # 若仍缺失，则清理目录准备重装
-            if not pyenv_bin_present:
-                logger.warning("git 修复未找到 bin/pyenv，将清理 ~/.pyenv 后重新安装")
-                self.ssh_tool.run_cmd('rm -rf "$HOME/.pyenv"')
-                pyenv_dir_exists = False
-
-        # 是否需要安装：既不在 PATH 也没有本地二进制
-        need_install = not (already_installed or pyenv_bin_present)
-        if need_install:
-            logger.info("通过官方安装器安装 pyenv ...")
-            install_cmd = "curl -fsSL https://pyenv.run | bash"
-            ok, out = self.ssh_tool.run_cmd(install_cmd, realtime_output=True)
-            if not ok:
-                # 若提示目录已存在，视为无须安装，继续配置
-                if "Kindly remove the '/root/.pyenv' directory first" in out or ".pyenv' directory first" in out:
-                    logger.warning("安装器提示 ~/.pyenv 已存在，跳过安装并继续配置")
-                else:
-                    logger.error("pyenv 安装脚本执行失败")
-                    return False
-
-            # 安装后再次校验二进制是否存在
-            ok, out = self.ssh_tool.run_cmd('test -x "$HOME/.pyenv/bin/pyenv" && echo yes || echo no')
-            pyenv_bin_present = ok and out.strip() == "yes"
-            if not pyenv_bin_present:
-                logger.error("安装完成后仍未找到 ~/.pyenv/bin/pyenv，安装可能失败")
-                return False
-
-        # 4) 写入 Shell 配置（.bashrc 以及登录 profile）
-        logger.info("写入 Shell 配置以自动加载 pyenv ...")
-        write_profile_cmd = (
-            # 选择登录 Shell 的 profile 文件（优先 .bash_profile 其次 .profile，不存在则创建 .profile）
-            'PROFILE_FILE="$HOME/.bash_profile"; '
-            '[ ! -f "$PROFILE_FILE" ] && [ -f "$HOME/.profile" ] && PROFILE_FILE="$HOME/.profile"; '
-            '[ ! -f "$PROFILE_FILE" ] && PROFILE_FILE="$HOME/.profile" && touch "$PROFILE_FILE"; '
-            # 将配置追加到 .bashrc 和 登录 profile（幂等式追加）
-            'for f in "$HOME/.bashrc" "$PROFILE_FILE"; do '
-            '  [ -f "$f" ] || touch "$f"; '
-            '  grep -q \'export PYENV_ROOT="$HOME/.pyenv"\' "$f" || echo \'export PYENV_ROOT="$HOME/.pyenv"\' >> "$f"; '
-            '  grep -q \'PYENV_ROOT/bin\' "$f" || echo \'[[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"\' >> "$f"; '
-            '  grep -q \'pyenv init - bash\' "$f" || echo \'eval "$(pyenv init - bash)"\' >> "$f"; '
-            "done"
-        )
-        ok, out = self.ssh_tool.run_cmd(write_profile_cmd)
-        if not ok:
-            logger.error("写入 Shell 配置失败")
-            return False
-
-        # 5) 让当前会话生效并校验
-        logger.info("让当前会话临时生效并验证 pyenv ...")
-        activate_and_check_cmd = (
-            'export PYENV_ROOT="$HOME/.pyenv"; '
-            'if [ -d "$PYENV_ROOT/bin" ]; then export PATH="$PYENV_ROOT/bin:$PATH"; fi; '
-            # 使用 bash 初始化以匹配官方建议；失败不阻断版本校验
-            "bash -lc 'eval \"$(pyenv init - bash)\"' >/dev/null 2>&1 || true; "
-            # 直接调用绝对路径兜底校验
-            "~/.pyenv/bin/pyenv --version || pyenv --version"
-        )
-        ok, out = self.ssh_tool.run_cmd(activate_and_check_cmd)
-        if ok and out.strip():
-            logger.info(f"pyenv 安装并生效成功: {out.strip()}")
+        # 检查是否已经安装 pyenv
+        success, output = self.ssh_tool.run_cmd("which pyenv 2>&1")
+        if success and output.strip():
+            logger.info("pyenv 已经安装，跳过安装步骤")
             return True
 
-        logger.error(f"pyenv 校验失败: {out}")
-        return False
+        # 步骤 A：检查并安装 git（pyenv 安装需要）
+        logger.info("检查 git 是否已安装...")
+        success, output = self.ssh_tool.run_cmd("which git 2>&1")
+        if not success or not output.strip():
+            logger.info("git 未安装，正在安装 git...")
+            if not self._yum_install("git"):
+                logger.error("git 安装失败，无法继续安装 pyenv")
+                return False
+
+        # 检查磁盘空间（确保至少有 100MB 可用空间）
+        logger.info("检查磁盘空间...")
+        success, output = self.ssh_tool.run_cmd("df -m ~ | tail -1 | awk '{print $4}'")
+        if success and output.strip().isdigit():
+            available_mb = int(output.strip())
+            if available_mb < 100:
+                logger.error(f"磁盘空间不足！可用空间: {available_mb}MB，建议至少 100MB")
+                return False
+            logger.info(f"磁盘可用空间: {available_mb}MB")
+
+        # 强制清理 ~/.pyenv 目录（包括可能存在的损坏文件）
+        logger.info("清理旧的 ~/.pyenv 目录（如果存在）...")
+        remove_cmd = "rm -rf ~/.pyenv"
+        self.ssh_tool.run_cmd(remove_cmd)
+
+        # 再次确认目录已完全删除
+        success, output = self.ssh_tool.run_cmd("test -d ~/.pyenv && echo 'exists' || echo 'not_exists'")
+        if "exists" == output.strip():
+            logger.error("无法删除旧的 ~/.pyenv 目录，可能存在权限问题")
+            return False
+
+        logger.info("目录清理完成")
+
+        # 步骤 A：从 gitee 克隆 pyenv 仓库
+        logger.info("正在从 gitee 克隆 pyenv 仓库...")
+        # 使用浅克隆（--depth 1）减少数据传输，提高成功率
+        # 添加 --progress 参数强制显示进度（即使在非交互式终端）
+        clone_cmd = "git clone --progress --depth 1 https://gitee.com/mirrors/pyenv.git ~/.pyenv 2>&1"
+        success, output = self.ssh_tool.run_cmd(clone_cmd, realtime_output=True)
+        if not success:
+            logger.error(f"克隆 pyenv 仓库失败: {output}")
+            # 清理可能创建的部分目录
+            self.ssh_tool.run_cmd("rm -rf ~/.pyenv")
+            return False
+
+        logger.info("pyenv 仓库克隆成功")
+
+        # 步骤 B：设置 shell 环境变量
+        logger.info("配置 shell 环境变量...")
+
+        # 检查 ~/.bashrc 是否已经包含 pyenv 配置
+        success, output = self.ssh_tool.run_cmd("grep -q 'PYENV_ROOT' ~/.bashrc && echo 'exists' || echo 'not_exists'")
+        if "exists" == output.strip():
+            logger.info("~/.bashrc 中已存在 pyenv 配置，先删除旧配置...")
+            # 删除所有包含 pyenv 或 PYENV_ROOT 的行
+            remove_cmds = [
+                "sed -i '/PYENV_ROOT/d' ~/.bashrc",
+                "sed -i '/pyenv init/d' ~/.bashrc",
+            ]
+            for cmd in remove_cmds:
+                self.ssh_tool.run_cmd(cmd)
+            logger.info("已删除旧的 pyenv 配置")
+
+        # 添加 PYENV_ROOT 环境变量
+        cmd1 = "echo 'export PYENV_ROOT=\"$HOME/.pyenv\"' >> ~/.bashrc"
+        success, output = self.ssh_tool.run_cmd(cmd1)
+        if not success:
+            logger.error(f"添加 PYENV_ROOT 配置失败: {output}")
+            return False
+
+        # 添加 PATH 配置
+        cmd2 = "echo '[[ -d $PYENV_ROOT/bin ]] && export PATH=\"$PYENV_ROOT/bin:$PATH\"' >> ~/.bashrc"
+        success, output = self.ssh_tool.run_cmd(cmd2)
+        if not success:
+            logger.error(f"添加 PATH 配置失败: {output}")
+            return False
+
+        # 添加 pyenv init 配置
+        cmd3 = "echo 'eval \"$(pyenv init - bash)\"' >> ~/.bashrc"
+        success, output = self.ssh_tool.run_cmd(cmd3)
+        if not success:
+            logger.error(f"添加 pyenv init 配置失败: {output}")
+            return False
+
+        logger.info("shell 环境变量配置成功")
+
+        # 步骤 C：通过 source 更新环境
+        logger.info("更新当前 shell 环境...")
+        source_cmd = "source ~/.bashrc 2>&1"
+        success, output = self.ssh_tool.run_cmd(source_cmd)
+        # source 命令可能返回一些警告，但不影响使用，所以只记录日志
+        if output.strip():
+            logger.debug(f"source ~/.bashrc 输出: {output}")
+
+        # 验证安装是否成功
+        logger.info("验证 pyenv 安装...")
+        # 由于 source 只在当前会话生效，需要手动设置环境变量来验证
+        verify_cmd = 'export PYENV_ROOT="$HOME/.pyenv" && export PATH="$PYENV_ROOT/bin:$PATH" && pyenv --version'
+        success, output = self.ssh_tool.run_cmd(verify_cmd)
+
+        if success and output.strip():
+            logger.info(f"✓ pyenv 安装成功！版本: {output.strip()}")
+            logger.info("=" * 70)
+            logger.info("📌 如何在当前终端使用 pyenv：")
+            logger.info("")
+            logger.info("   方法1（推荐）：退出当前终端，重新登录服务器")
+            logger.info("")
+            logger.info("   方法2：在当前终端执行以下命令：")
+            logger.info("   source ~/.bashrc")
+            logger.info("")
+            logger.info("   验证 pyenv 是否可用：")
+            logger.info("   pyenv --version")
+            logger.info("")
+            logger.info("💡 说明：pyenv 环境变量已添加到 ~/.bashrc")
+            logger.info("   新的终端会话将自动加载 pyenv 配置")
+            logger.info("=" * 70)
+            return True
+        else:
+            logger.error(f"pyenv 安装验证失败: {output}")
+            logger.error("请检查安装过程是否有错误")
+            return False
 
     def set_english_locale(self) -> bool:
         """设置操作系统为英文环境"""
@@ -1395,5 +1402,5 @@ class LinuxEnv:
 
 
 if __name__ == "__main__":
-    linux_env = LinuxEnv(ip="192.168.137.220", username="root", password="root")
+    linux_env = LinuxEnv(ip="192.168.203.227", username="root", password="root")
     linux_env.install_soft(Soft.PYENV)
