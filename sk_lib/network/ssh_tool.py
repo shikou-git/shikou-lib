@@ -385,8 +385,8 @@ class SSHTool:
                 try:
                     sftp.remove(remote_path)
                     logger.debug(f"删除远程文件成功: {remote_path}")
-                except FileNotFoundError:
-                    logger.debug(f"远程文件不存在（视为成功）: {remote_path}")
+                except FileNotFoundError as e:
+                    logger.warning(f"远程文件不存在（视为成功）: {remote_path}, {e}")
                 return True
 
         except Exception as e:

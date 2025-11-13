@@ -1,8 +1,10 @@
 import json
 import os
+import tempfile
 import time
 from datetime import datetime
 
+import requests
 from loguru import logger
 
 from sk_lib.network import SSHTool
@@ -1108,21 +1110,28 @@ class LinuxEnv:
 
         return flag
 
-    def download_python(self, python_version: str, download_dir: str) -> bool:
+    def download_python(self, version: str, download_dir: str, replace: bool = False) -> bool:
         """下载指定版本的 Python 源码包
 
         Args:
-            python_version: Python 版本号，例如 "3.11.0"
+            version: Python 版本号，例如 "3.11.0"
             download_dir: 下载目录路径
+            replace: 是否覆盖
 
         Returns:
             bool: 成功返回 True，失败返回 False
         """
-        logger.info(f"开始下载 Python {python_version}...")
+        logger.info(f"开始下载 Python {version}...")
+        source_url = "https://mirrors.huaweicloud.com/python/"
+
+        """
+        清华：https://mirrors.tuna.tsinghua.edu.cn/python/
+        华为：https://mirrors.huaweicloud.com/python/
+        """
 
         # 构建下载 URL（使用国内镜像源 - 华为云镜像）
-        filename = f"Python-{python_version}.tgz"
-        url = f"https://mirrors.huaweicloud.com/python/{python_version}/{filename}"
+        filename = f"Python-{version}.tar.xz"
+        url = f"{source_url}/{version}/{filename}"
 
         # 确保下载目录存在
         logger.info(f"检查下载目录是否存在: {download_dir}")
@@ -1140,43 +1149,90 @@ class LinuxEnv:
         check_cmd = f"test -f {download_path} && echo 'exists' || echo 'not_exists'"
         success, output = self.ssh_tool.run_cmd(check_cmd)
         if success and output.strip() == "exists":
-            logger.info(f"文件已存在，跳过下载: {download_path}")
-            return True
+            if replace:
+                if not self.ssh_tool.remove_file(download_path):
+                    return False
+            else:
+                logger.info(f"文件已存在，跳过下载: {download_path}")
+                return True
 
-        # 使用 wget 下载（优先）或 curl（备用）
+        # 使用 requests 在本地下载，然后通过 SFTP 上传到远程服务器
         logger.info(f"开始下载: {url}")
         logger.info(f"保存到: {download_path}")
 
-        # 尝试使用 wget
-        wget_cmd = f"wget -O {download_path} {url}"
-        wget_cmd_stream = self._wrap_cmd_with_pty(wget_cmd)
-        success, output = self.ssh_tool.run_cmd(wget_cmd_stream, realtime_output=True, timeout=600)
+        # 在本地临时目录下载文件
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f"-{filename}") as tmp_file:
+            local_temp_path = tmp_file.name
 
-        if not success:
-            # 如果 wget 失败，尝试使用 curl
-            logger.info("wget 下载失败，尝试使用 curl...")
-            curl_cmd = f"curl -L -o {download_path} {url}"
-            curl_cmd_stream = self._wrap_cmd_with_pty(curl_cmd)
-            success, output = self.ssh_tool.run_cmd(curl_cmd_stream, realtime_output=True, timeout=600)
+        try:
+            logger.info("正在从镜像源下载文件到本地...")
+            # 使用 requests 下载，支持流式下载和进度显示
+            response = requests.get(url, stream=True, timeout=300)
+            response.raise_for_status()
 
-        if not success:
-            logger.error(f"下载 Python {python_version} 失败: {output}")
+            # 获取文件总大小
+            total_size = int(response.headers.get("content-length", 0))
+            downloaded_size = 0
+
+            # 写入本地临时文件
+            with open(local_temp_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded_size += len(chunk)
+                        # 每下载 1MB 显示一次进度
+                        if downloaded_size % (1024 * 1024) == 0 or downloaded_size == total_size:
+                            if total_size > 0:
+                                percent = (downloaded_size / total_size) * 100
+                                logger.debug(
+                                    f"下载进度: {percent:.1f}% ({downloaded_size / 1024 / 1024:.1f}MB / {total_size / 1024 / 1024:.1f}MB)"
+                                )
+                            else:
+                                logger.debug(f"已下载: {downloaded_size / 1024 / 1024:.1f}MB")
+
+            logger.info(f"本地下载完成，文件大小: {downloaded_size / 1024 / 1024:.1f}MB")
+
+            # 通过 SFTP 上传到远程服务器
+            logger.info(f"正在上传文件到远程服务器: {download_path}")
+            success = self.ssh_tool.upload_file(local_temp_path, download_path, create_dirs=True)
+
+            if not success:
+                logger.error(f"上传文件到远程服务器失败: {download_path}")
+                return False
+
+            # 验证远程文件是否存在
+            logger.info(f"验证远程文件是否存在: {download_path}")
+            verify_cmd = f"test -f {download_path} && echo 'exists' || echo 'not_exists'"
+            success, output = self.ssh_tool.run_cmd(verify_cmd)
+            if success and output.strip() == "exists":
+                # 获取文件大小
+                size_cmd = f"ls -lh {download_path} | awk '{{print $5}}'"
+                success, size_output = self.ssh_tool.run_cmd(size_cmd)
+                file_size = size_output.strip() if success else "未知"
+                logger.info(f"Python {version} 下载并上传成功: {download_path} (大小: {file_size})")
+                return True
+            else:
+                logger.error(f"远程文件验证失败: {download_path}")
+                return False
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"下载 Python {version} 失败: {e}")
             return False
 
-        # 验证文件是否下载成功
-        logger.info(f"验证下载文件是否存在: {download_path}")
-        verify_cmd = f"test -f {download_path} && echo 'exists' || echo 'not_exists'"
-        success, output = self.ssh_tool.run_cmd(verify_cmd)
-        if success and output.strip() == "exists":
-            # 获取文件大小
-            size_cmd = f"ls -lh {download_path} | awk '{{print $5}}'"
-            success, size_output = self.ssh_tool.run_cmd(size_cmd)
-            file_size = size_output.strip() if success else "未知"
-            logger.info(f"Python {python_version} 下载成功: {download_path} (大小: {file_size})")
-            return True
-        else:
-            logger.error(f"下载文件验证失败: {download_path}")
+        except Exception as e:
+            logger.error(f"下载或上传过程中出错: {e}")
             return False
+
+        finally:
+            # 清理本地临时文件
+            if os.path.exists(local_temp_path):
+                try:
+                    os.remove(local_temp_path)
+                    logger.debug(f"已清理本地临时文件: {local_temp_path}")
+                    return True
+                except Exception as e:
+                    logger.warning(f"清理本地临时文件失败: {e}")
+                    return False
 
     def _install_pyenv(self, version: str | None = None) -> bool:
         """安装 pyenv（Python 版本管理工具）
@@ -2144,5 +2200,6 @@ class LinuxEnv:
 
 
 if __name__ == "__main__":
-    linux_env = LinuxEnv(os_platform=OsPlatform.Centos, ip="192.168.203.227", username="root", password="root")
-    linux_env.base_install()
+    linux_env = LinuxEnv(os_platform=OsPlatform.Centos, ip="192.168.137.220", username="root", password="root")
+    # linux_env = LinuxEnv(os_platform=OsPlatform.Centos, ip="192.168.203.227", username="root", password="root")
+    linux_env.download_python(version="3.10.18", download_dir="/root/.pyenv/cache", replace=True)
