@@ -112,7 +112,7 @@ enabled=0
 
 [extras-common]
 name=CentOS Stream $releasever - Extras packages
-baseurl=https://mirrors.aliyun.com/centos-stream/$stream/extras/$basearch/os/
+baseurl=https://mirrors.aliyun.com/centos-stream/SIGs/$stream/extras/$basearch/extras-common/
 gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-Extras-SHA512
 gpgcheck=1
 repo_gpgcheck=0

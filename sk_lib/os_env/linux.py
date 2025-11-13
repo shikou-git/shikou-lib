@@ -25,6 +25,38 @@ class LinuxEnv:
         safe_cmd = cmd.replace("'", "'\"'\"'")
         return f"script -qec '{safe_cmd}' /dev/null"
 
+    def install_development_tools(self) -> bool:
+        """安装 Development Tools 编译工具组（包含 gcc、make、glibc-devel 等编译依赖）
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info("安装 Development Tools 编译工具组...")
+        group_install_cmd = "yum groupinstall -y 'Development Tools'"
+        group_install_cmd_stream = self._wrap_cmd_with_pty(group_install_cmd)
+        success, output = self.ssh_tool.run_cmd(group_install_cmd_stream, realtime_output=True)
+        if not success:
+            logger.error(f"Development Tools 组安装失败: {output}")
+            return False
+
+        # 验证是否真正安装成功（检查关键编译工具是否存在）
+        logger.info("验证编译工具是否安装成功...")
+        key_tools = ["gcc", "make"]
+        missing_tools = []
+
+        for tool in key_tools:
+            check_cmd = f"which {tool} && echo 'exists' || echo 'not_exists'"
+            check_success, check_output = self.ssh_tool.run_cmd(check_cmd)
+            if not check_success or check_output.strip() != "exists":
+                missing_tools.append(tool)
+
+        if missing_tools:
+            logger.error(f"Development Tools 组安装失败：以下工具未找到 {missing_tools}")
+            return False
+
+        logger.info("Development Tools 组安装成功（gcc 和 make 已可用）")
+        return True
+
     def base_install(self) -> bool:
         """基础环境安装
         包括：EPEL 仓库、Git、Development Tools 编译工具组，以及系统更新
@@ -34,7 +66,7 @@ class LinuxEnv:
         """
         logger.info("开始基础环境安装...")
 
-        if not linux_env.clean_yum_process():
+        if not self.clean_yum_process():
             return False
 
         # 安装 EPEL 仓库（推荐，提供更多软件包）
@@ -57,15 +89,9 @@ class LinuxEnv:
             if not self.install_soft(tool):
                 logger.error(f"{tool} 安装失败")
 
-        # 安装 Development Tools 组（包含 gcc、make、glibc-devel 等编译依赖）
-        logger.info("安装 Development Tools 编译工具组...")
-        group_install_cmd = "yum groupinstall -y 'Development Tools'"
-        group_install_cmd_stream = self._wrap_cmd_with_pty(group_install_cmd)
-        success, output = self.ssh_tool.run_cmd(group_install_cmd_stream, realtime_output=True)
-        if not success:
-            logger.error(f"Development Tools 组安装失败: {output}")
+        # 安装 Development Tools 组
+        if not self.install_development_tools():
             return False
-        logger.info("Development Tools 组安装成功")
 
         logger.info("基础环境安装完成")
         return True
@@ -2202,4 +2228,5 @@ class LinuxEnv:
 if __name__ == "__main__":
     linux_env = LinuxEnv(os_platform=OsPlatform.Centos, ip="192.168.137.220", username="root", password="root")
     # linux_env = LinuxEnv(os_platform=OsPlatform.Centos, ip="192.168.203.227", username="root", password="root")
-    linux_env.download_python(version="3.10.18", download_dir="/root/.pyenv/cache", replace=True)
+
+    linux_env.install_development_tools()
