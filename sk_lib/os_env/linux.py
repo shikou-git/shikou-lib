@@ -678,23 +678,124 @@ class LinuxEnv:
         logger.debug("防火墙状态: 未启用或无法确定")
         return "disabled"
 
-    def install_soft(self, soft: Soft | str) -> bool:
-        """安装软件"""
+    def install_soft(self, soft: Soft | str, version: str | None = None) -> bool:
+        """安装软件
+
+        Args:
+            soft: 软件名称或 Soft 枚举
+            version: 软件版本号（可选），仅对 pyenv 和 nvm 等特殊软件有效
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
         if isinstance(soft, Soft):
             soft = soft.value
 
         # 特殊软件使用专门的安装方法
         if soft == "pyenv":
-            return self._install_pyenv()
+            return self._install_pyenv(version=version)
+        elif soft == "nvm":
+            # nvm 的默认版本在 _install_nvm 中定义
+            if version:
+                return self._install_nvm(version=version)
+            else:
+                return self._install_nvm()
 
         return self._yum_install(soft)
 
     def uninstall_soft(self, soft: Soft | str) -> bool:
-        """卸载软件"""
+        """卸载软件
+
+        Args:
+            soft: 软件名称或 Soft 枚举
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
         if isinstance(soft, Soft):
             soft = soft.value
 
+        # 特殊软件使用专门的卸载方法
+        if soft == "pyenv":
+            return self._uninstall_pyenv()
+        elif soft == "nvm":
+            return self._uninstall_nvm()
+
         return self._yum_uninstall(soft)
+
+    def yum_update(self, package_name: str | None = None, clean_cache: bool = True) -> bool:
+        """更新系统包
+
+        Args:
+            package_name: 指定要更新的包名，如果为 None 则更新所有包
+            clean_cache: 是否在更新前清理缓存，默认 True
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info("开始更新系统包...")
+
+        # 检查并清理可能存在的 yum 进程和锁文件
+        logger.info("检查是否有其他 yum 进程正在运行...")
+        pids = self.get_pids_by_name("yum", case_sensitive=False)
+        if pids:
+            logger.warning(f"发现正在运行的 yum 进程: {pids}，将强制终止...")
+            results = self.kill_process_by_pids(pids, force=True)
+            # 等待进程完全终止
+            time.sleep(2)
+            logger.info("已终止旧的 yum 进程")
+
+        # 清理 yum 锁文件（如果存在）
+        logger.info("清理 yum 锁文件...")
+        lock_files = [
+            "/var/run/yum.pid",
+            "/var/lock/subsys/yum",
+        ]
+        for lock_file in lock_files:
+            remove_cmd = f"rm -f {lock_file}"
+            self.ssh_tool.run_cmd(remove_cmd)
+        logger.info("yum 锁文件清理完成")
+
+        # 根据不同的操作系统平台选择更新命令
+        if self.os_platform == OsPlatform.Centos:
+            # 清理缓存（可选）
+            if clean_cache:
+                logger.info("清理 yum 缓存...")
+                clean_cmd = "yum clean all"
+                success, output = self.ssh_tool.run_cmd(clean_cmd, realtime_output=True)
+                if success:
+                    logger.info("yum 缓存清理成功")
+                else:
+                    logger.warning(f"yum 缓存清理失败: {output}")
+
+            # 构建更新命令
+            if package_name:
+                update_cmd = f"yum update -y {package_name}"
+                logger.info(f"更新指定包: {package_name}")
+            else:
+                update_cmd = "yum update -y"
+                logger.info("更新所有包（这可能需要较长时间）...")
+        else:
+            logger.error("不支持的操作系统平台")
+            raise ValueError("OsPlatform not supported")
+
+        # 执行更新命令（使用 stdbuf 强制行缓冲，实现实时输出）
+        # stdbuf -oL -eL 强制标准输出和标准错误使用行缓冲
+        update_cmd_stream = f"command -v stdbuf >/dev/null 2>&1 && stdbuf -oL -eL {update_cmd} || {update_cmd}"
+        success, output = self.ssh_tool.run_cmd(update_cmd_stream, realtime_output=True, timeout=1800)
+
+        if success:
+            if package_name:
+                logger.info(f"包 {package_name} 更新成功")
+            else:
+                logger.info("系统包更新成功")
+            return True
+        else:
+            if package_name:
+                logger.error(f"包 {package_name} 更新失败: {output}")
+            else:
+                logger.error(f"系统包更新失败: {output}")
+            return False
 
     def _yum_install(self, soft_name: str) -> bool:
         """yum安装"""
@@ -737,9 +838,19 @@ class LinuxEnv:
 
         return flag
 
-    def _install_pyenv(self) -> bool:
-        """安装 pyenv（Python 版本管理工具）"""
-        logger.info("开始安装 pyenv...")
+    def _install_pyenv(self, version: str | None = None) -> bool:
+        """安装 pyenv（Python 版本管理工具）
+
+        Args:
+            version: pyenv 版本号，例如 "v2.3.36"。如果为 None，则安装最新版本
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        if version:
+            logger.info(f"开始安装 pyenv (version: {version})...")
+        else:
+            logger.info("开始安装 pyenv (最新版本)...")
 
         # 检查是否已经安装 pyenv
         success, output = self.ssh_tool.run_cmd("which pyenv 2>&1")
@@ -781,9 +892,15 @@ class LinuxEnv:
 
         # 步骤 A：从 gitee 克隆 pyenv 仓库
         logger.info("正在从 gitee 克隆 pyenv 仓库...")
-        # 使用浅克隆（--depth 1）减少数据传输，提高成功率
+        # 如果指定了版本，需要完整克隆后再切换；否则使用浅克隆获取最新版本
+        if version:
+            # 完整克隆（不使用 --depth 1）以便切换到指定版本
+            clone_cmd = "git clone --progress https://gitee.com/mirrors/pyenv.git ~/.pyenv 2>&1"
+        else:
+            # 使用浅克隆（--depth 1）减少数据传输，提高成功率
+            clone_cmd = "git clone --progress --depth 1 https://gitee.com/mirrors/pyenv.git ~/.pyenv 2>&1"
+
         # 添加 --progress 参数强制显示进度（即使在非交互式终端）
-        clone_cmd = "git clone --progress --depth 1 https://gitee.com/mirrors/pyenv.git ~/.pyenv 2>&1"
         success, output = self.ssh_tool.run_cmd(clone_cmd, realtime_output=True)
         if not success:
             logger.error(f"克隆 pyenv 仓库失败: {output}")
@@ -792,6 +909,17 @@ class LinuxEnv:
             return False
 
         logger.info("pyenv 仓库克隆成功")
+
+        # 如果指定了版本，切换到该版本
+        if version:
+            logger.info(f"切换到版本 {version}...")
+            checkout_cmd = f"cd ~/.pyenv && git checkout {version} 2>&1"
+            success, output = self.ssh_tool.run_cmd(checkout_cmd)
+            if not success:
+                logger.error(f"切换到版本 {version} 失败: {output}")
+                self.ssh_tool.run_cmd("rm -rf ~/.pyenv")
+                return False
+            logger.info(f"成功切换到版本 {version}")
 
         # 步骤 B：设置 shell 环境变量
         logger.info("配置 shell 环境变量...")
@@ -866,6 +994,280 @@ class LinuxEnv:
         else:
             logger.error(f"pyenv 安装验证失败: {output}")
             logger.error("请检查安装过程是否有错误")
+            return False
+
+    def _install_nvm(self, version: str | None = None) -> bool:
+        """安装 nvm（Node Version Manager）
+
+        Args:
+            version: nvm 版本号，例如 "v0.40.3"。如果为 None，则安装最新版本
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        if version:
+            logger.info(f"开始安装 nvm (version: {version})...")
+        else:
+            logger.info("开始安装 nvm (最新版本)...")
+
+        # 检查是否已经安装 nvm
+        check_cmd = (
+            'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \\. "$NVM_DIR/nvm.sh" && nvm --version 2>&1'
+        )
+        success, output = self.ssh_tool.run_cmd(check_cmd)
+        if success and output.strip() and "command not found" not in output.lower():
+            logger.info(f"nvm 已经安装（版本: {output.strip()}），跳过安装步骤")
+            return True
+
+        # 检查 git 是否已安装
+        logger.info("检查 git 是否已安装...")
+        success, output = self.ssh_tool.run_cmd("which git 2>&1")
+        if not success or not output.strip():
+            logger.info("git 未安装，正在安装 git...")
+            if not self._yum_install("git"):
+                logger.error("git 安装失败，无法继续安装 nvm")
+                return False
+
+        # 检查磁盘空间（确保至少有 50MB 可用空间）
+        logger.info("检查磁盘空间...")
+        success, output = self.ssh_tool.run_cmd("df -m ~ | tail -1 | awk '{print $4}'")
+        if success and output.strip().isdigit():
+            available_mb = int(output.strip())
+            if available_mb < 50:
+                logger.error(f"磁盘空间不足！可用空间: {available_mb}MB，建议至少 50MB")
+                return False
+            logger.info(f"磁盘可用空间: {available_mb}MB")
+
+        # 强制清理 ~/.nvm 目录（包括可能存在的损坏文件）
+        logger.info("清理旧的 ~/.nvm 目录（如果存在）...")
+        remove_cmd = "rm -rf ~/.nvm"
+        self.ssh_tool.run_cmd(remove_cmd)
+
+        # 再次确认目录已完全删除
+        success, output = self.ssh_tool.run_cmd("test -d ~/.nvm && echo 'exists' || echo 'not_exists'")
+        if "exists" == output.strip():
+            logger.error("无法删除旧的 ~/.nvm 目录，可能存在权限问题")
+            return False
+
+        logger.info("目录清理完成")
+
+        # 步骤 1：从 gitee 克隆 nvm 仓库
+        logger.info("正在从 gitee 克隆 nvm 仓库...")
+        # 如果指定了版本，需要完整克隆后再切换；否则使用浅克隆获取最新版本
+        if version:
+            # 完整克隆（不使用 --depth 1）以便切换到指定版本
+            clone_cmd = "git clone --progress https://gitee.com/mirrors/nvm-sh.git ~/.nvm 2>&1"
+        else:
+            # 使用浅克隆（--depth 1）减少数据传输，提高成功率
+            clone_cmd = "git clone --progress --depth 1 https://gitee.com/mirrors/nvm-sh.git ~/.nvm 2>&1"
+
+        success, output = self.ssh_tool.run_cmd(clone_cmd, realtime_output=True)
+        if not success:
+            logger.error(f"克隆 nvm 仓库失败: {output}")
+            self.ssh_tool.run_cmd("rm -rf ~/.nvm")
+            return False
+
+        logger.info("nvm 仓库克隆成功")
+
+        # 如果指定了版本，切换到该版本
+        if version:
+            logger.info(f"切换到版本 {version}...")
+            checkout_cmd = f"cd ~/.nvm && git checkout {version} 2>&1"
+            success, output = self.ssh_tool.run_cmd(checkout_cmd)
+            if not success:
+                logger.error(f"切换到版本 {version} 失败: {output}")
+                self.ssh_tool.run_cmd("rm -rf ~/.nvm")
+                return False
+            logger.info(f"成功切换到版本 {version}")
+
+        # 步骤 3：设置 shell 环境变量
+        logger.info("配置 shell 环境变量...")
+
+        # 检查 ~/.bashrc 是否已经包含 nvm 配置
+        success, output = self.ssh_tool.run_cmd("grep -q 'NVM_DIR' ~/.bashrc && echo 'exists' || echo 'not_exists'")
+        if "exists" == output.strip():
+            logger.info("~/.bashrc 中已存在 nvm 配置，先删除旧配置...")
+            # 删除所有包含 nvm 或 NVM_DIR 的行
+            remove_cmds = [
+                "sed -i '/NVM_DIR/d' ~/.bashrc",
+                "sed -i '/nvm.sh/d' ~/.bashrc",
+                "sed -i '/bash_completion/d' ~/.bashrc",
+            ]
+            for cmd in remove_cmds:
+                self.ssh_tool.run_cmd(cmd)
+            logger.info("已删除旧的 nvm 配置")
+
+        # 添加 NVM_DIR 环境变量
+        cmd1 = "echo 'export NVM_DIR=\"$HOME/.nvm\"' >> ~/.bashrc"
+        success, output = self.ssh_tool.run_cmd(cmd1)
+        if not success:
+            logger.error(f"添加 NVM_DIR 配置失败: {output}")
+            return False
+
+        # 添加 nvm.sh 加载脚本
+        cmd2 = 'echo \'[ -s "$NVM_DIR/nvm.sh" ] && \\. "$NVM_DIR/nvm.sh"  # This loads nvm\' >> ~/.bashrc'
+        success, output = self.ssh_tool.run_cmd(cmd2)
+        if not success:
+            logger.error(f"添加 nvm.sh 配置失败: {output}")
+            return False
+
+        # 添加 bash_completion 加载脚本
+        cmd3 = 'echo \'[ -s "$NVM_DIR/bash_completion" ] && \\. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion\' >> ~/.bashrc'
+        success, output = self.ssh_tool.run_cmd(cmd3)
+        if not success:
+            logger.error(f"添加 bash_completion 配置失败: {output}")
+            return False
+
+        logger.info("shell 环境变量配置成功")
+
+        # 步骤 4：通过 source 更新环境
+        logger.info("更新当前 shell 环境...")
+        source_cmd = "source ~/.bashrc 2>&1"
+        success, output = self.ssh_tool.run_cmd(source_cmd)
+        if output.strip():
+            logger.debug(f"source ~/.bashrc 输出: {output}")
+
+        # 验证安装是否成功
+        logger.info("验证 nvm 安装...")
+        verify_cmd = 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \\. "$NVM_DIR/nvm.sh" && nvm --version'
+        success, output = self.ssh_tool.run_cmd(verify_cmd)
+
+        if success and output.strip():
+            logger.info(f"✓ nvm 安装成功！版本: {output.strip()}")
+            logger.info("=" * 70)
+            logger.info("📌 如何在当前终端使用 nvm：")
+            logger.info("")
+            logger.info("   方法1（推荐）：退出当前终端，重新登录服务器")
+            logger.info("")
+            logger.info("   方法2：在当前终端执行以下命令：")
+            logger.info("   source ~/.bashrc")
+            logger.info("")
+            logger.info("   验证 nvm 是否可用：")
+            logger.info("   nvm --version")
+            logger.info("")
+            logger.info("   使用 nvm 安装 Node.js：")
+            logger.info("   nvm install node        # 安装最新版本")
+            logger.info("   nvm install --lts       # 安装最新 LTS 版本")
+            logger.info("   nvm install 18.20.0     # 安装指定版本")
+            logger.info("")
+            logger.info("💡 说明：nvm 环境变量已添加到 ~/.bashrc")
+            logger.info("   新的终端会话将自动加载 nvm 配置")
+            logger.info("=" * 70)
+            return True
+        else:
+            logger.error(f"nvm 安装验证失败: {output}")
+            logger.error("请检查安装过程是否有错误")
+            return False
+
+    def _uninstall_pyenv(self) -> bool:
+        """卸载 pyenv（Python 版本管理工具）
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info("开始卸载 pyenv...")
+
+        # 检查是否已经安装 pyenv
+        success, output = self.ssh_tool.run_cmd("which pyenv 2>&1")
+        if not success or not output.strip():
+            success, output = self.ssh_tool.run_cmd("test -d ~/.pyenv && echo 'exists' || echo 'not_exists'")
+            if "not_exists" == output.strip():
+                logger.info("pyenv 未安装，无需卸载")
+                return True
+
+        # 步骤 1：删除 ~/.pyenv 目录
+        logger.info("删除 ~/.pyenv 目录...")
+        remove_cmd = "rm -rf ~/.pyenv"
+        success, output = self.ssh_tool.run_cmd(remove_cmd)
+        if not success:
+            logger.error(f"删除 ~/.pyenv 目录失败: {output}")
+            return False
+        logger.info("已删除 ~/.pyenv 目录")
+
+        # 步骤 2：从 ~/.bashrc 中删除 pyenv 配置
+        logger.info("清理 ~/.bashrc 中的 pyenv 配置...")
+        remove_cmds = [
+            "sed -i '/PYENV_ROOT/d' ~/.bashrc",
+            "sed -i '/pyenv init/d' ~/.bashrc",
+        ]
+        for cmd in remove_cmds:
+            self.ssh_tool.run_cmd(cmd)
+        logger.info("已清理 ~/.bashrc 中的 pyenv 配置")
+
+        # 验证卸载是否成功
+        logger.info("验证 pyenv 卸载...")
+        success, output = self.ssh_tool.run_cmd("test -d ~/.pyenv && echo 'exists' || echo 'not_exists'")
+        if "not_exists" == output.strip():
+            logger.info("✓ pyenv 卸载成功！")
+            logger.info("=" * 70)
+            logger.info("📌 提示：")
+            logger.info("")
+            logger.info("   为了使配置生效，请执行以下操作之一：")
+            logger.info("")
+            logger.info("   方法1（推荐）：退出当前终端，重新登录服务器")
+            logger.info("")
+            logger.info("   方法2：在当前终端执行以下命令：")
+            logger.info("   source ~/.bashrc")
+            logger.info("")
+            logger.info("=" * 70)
+            return True
+        else:
+            logger.error("pyenv 卸载验证失败，~/.pyenv 目录仍然存在")
+            return False
+
+    def _uninstall_nvm(self) -> bool:
+        """卸载 nvm（Node Version Manager）
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info("开始卸载 nvm...")
+
+        # 检查是否已经安装 nvm
+        success, output = self.ssh_tool.run_cmd("test -d ~/.nvm && echo 'exists' || echo 'not_exists'")
+        if "not_exists" == output.strip():
+            logger.info("nvm 未安装，无需卸载")
+            return True
+
+        # 步骤 1：删除 ~/.nvm 目录
+        logger.info("删除 ~/.nvm 目录...")
+        remove_cmd = "rm -rf ~/.nvm"
+        success, output = self.ssh_tool.run_cmd(remove_cmd)
+        if not success:
+            logger.error(f"删除 ~/.nvm 目录失败: {output}")
+            return False
+        logger.info("已删除 ~/.nvm 目录")
+
+        # 步骤 2：从 ~/.bashrc 中删除 nvm 配置
+        logger.info("清理 ~/.bashrc 中的 nvm 配置...")
+        remove_cmds = [
+            "sed -i '/NVM_DIR/d' ~/.bashrc",
+            "sed -i '/nvm.sh/d' ~/.bashrc",
+            "sed -i '/bash_completion/d' ~/.bashrc",
+        ]
+        for cmd in remove_cmds:
+            self.ssh_tool.run_cmd(cmd)
+        logger.info("已清理 ~/.bashrc 中的 nvm 配置")
+
+        # 验证卸载是否成功
+        logger.info("验证 nvm 卸载...")
+        success, output = self.ssh_tool.run_cmd("test -d ~/.nvm && echo 'exists' || echo 'not_exists'")
+        if "not_exists" == output.strip():
+            logger.info("✓ nvm 卸载成功！")
+            logger.info("=" * 70)
+            logger.info("📌 提示：")
+            logger.info("")
+            logger.info("   为了使配置生效，请执行以下操作之一：")
+            logger.info("")
+            logger.info("   方法1（推荐）：退出当前终端，重新登录服务器")
+            logger.info("")
+            logger.info("   方法2：在当前终端执行以下命令：")
+            logger.info("   source ~/.bashrc")
+            logger.info("")
+            logger.info("=" * 70)
+            return True
+        else:
+            logger.error("nvm 卸载验证失败，~/.nvm 目录仍然存在")
             return False
 
     def set_english_locale(self) -> bool:
@@ -1403,4 +1805,25 @@ class LinuxEnv:
 
 if __name__ == "__main__":
     linux_env = LinuxEnv(ip="192.168.203.227", username="root", password="root")
-    linux_env.install_soft(Soft.PYENV)
+
+    # ========== 安装示例 ==========
+
+    # 示例1：安装最新版本的 pyenv（推荐，速度快）
+    # linux_env.install_soft(Soft.PYENV)
+
+    # 示例2：安装指定版本的 pyenv
+    # linux_env.install_soft(Soft.PYENV, version="v2.3.36")
+
+    # 示例3：安装最新版本的 nvm（推荐，速度快）
+    # linux_env.install_soft(Soft.NVM)
+
+    # 示例4：安装指定版本的 nvm
+    # linux_env.install_soft(Soft.NVM, version="v0.39.0")
+
+    # ========== 卸载示例 ==========
+
+    # 示例5：卸载 pyenv
+    # linux_env.uninstall_soft(Soft.PYENV)
+
+    # 示例6：卸载 nvm
+    linux_env.uninstall_soft(Soft.NVM)

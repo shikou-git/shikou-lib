@@ -7,6 +7,7 @@ class Soft(Enum):
     DMIDECODE = "dmidecode"
     NGINX = "nginx"
     PYENV = "pyenv"
+    NVM = "nvm"
 
 
 class OsPlatform(Enum):
