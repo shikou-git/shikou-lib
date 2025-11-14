@@ -47,7 +47,10 @@ class LinuxEnv:
         for tool in key_tools:
             check_cmd = f"which {tool} && echo 'exists' || echo 'not_exists'"
             check_success, check_output = self.ssh_tool.run_cmd(check_cmd)
-            if not check_success or check_output.strip() != "exists":
+            # 检查输出的最后一行是否是 "exists"（因为 which 命令会输出路径）
+            output_lines = check_output.strip().split("\n")
+            last_line = output_lines[-1].strip() if output_lines else ""
+            if not check_success or last_line != "exists":
                 missing_tools.append(tool)
 
         if missing_tools:
@@ -484,6 +487,7 @@ class LinuxEnv:
                 unique_ports_info.append(port_info)
 
         logger.info(f"找到 {len(unique_ports_info)} 个开放的端口")
+        logger.info(f"端口信息：\n{json.dumps(unique_ports_info, indent=2)}")
         return unique_ports_info
 
     def get_process_list(self) -> list[dict[str, str | int | float]]:
@@ -2226,7 +2230,6 @@ class LinuxEnv:
 
 
 if __name__ == "__main__":
-    linux_env = LinuxEnv(os_platform=OsPlatform.Centos, ip="192.168.137.220", username="root", password="root")
+    linux_env = LinuxEnv(os_platform=OsPlatform.Centos, ip="192.168.137.200", username="root", password="root")
     # linux_env = LinuxEnv(os_platform=OsPlatform.Centos, ip="192.168.203.227", username="root", password="root")
-
-    linux_env.install_development_tools()
+    linux_env.install_soft("nvm")
