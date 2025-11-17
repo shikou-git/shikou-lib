@@ -1,12 +1,15 @@
 import ctypes
+import json
 import os
 import subprocess
 import sys
+import winreg
 
 from loguru import logger
 
 
 class WindowsEnv:
+    _SCOPE_CHOICES = ("process", "user", "machine")
 
     @staticmethod
     def run_cmd(cmd: str, check: bool = False, encoding: str = "utf-8", **kwargs) -> tuple[bool, str]:
@@ -441,6 +444,180 @@ class WindowsEnv:
                 subprocess.Popen(cmd, shell=True)
                 logger.info(f"已打开 PowerShell，工作目录: {abs_dir}")
 
+    # ------------------------------------------------------------------ #
+    # 环境变量相关方法
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _get_registry_info(scope: str) -> tuple[winreg.HKEYType, str]:
+        scope = (scope or "").lower()
+        if scope == "user":
+            return winreg.HKEY_CURRENT_USER, r"Environment"
+        if scope == "machine":
+            return winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+        raise ValueError("scope 仅支持 'process'、'user' 或 'machine'")
+
+    @staticmethod
+    def _broadcast_env_change():
+        HWND_BROADCAST = 0xFFFF
+        WM_SETTINGCHANGE = 0x001A
+        SMTO_ABORTIFHUNG = 0x0002
+        try:
+            ctypes.windll.user32.SendMessageTimeoutW(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                0,
+                ctypes.c_wchar_p("Environment"),
+                SMTO_ABORTIFHUNG,
+                5000,
+                None,
+            )
+        except Exception as e:
+            logger.debug(f"广播环境变量变更失败: {e}")
+
+    @staticmethod
+    def get_env_var(name: str, scope: str = "process") -> tuple[bool, str | None]:
+        """
+        获取环境变量
+
+        Args:
+            name: 变量名
+            scope: process/user/machine
+        """
+        scope = scope.lower()
+        if scope not in WindowsEnv._SCOPE_CHOICES:
+            return False, f"scope 仅支持 {WindowsEnv._SCOPE_CHOICES}"
+
+        if scope == "process":
+            value = os.environ.get(name)
+            return (True, value) if value is not None else (False, None)
+
+        try:
+            root, path = WindowsEnv._get_registry_info(scope)
+            access = winreg.KEY_READ | winreg.KEY_WOW64_64KEY
+            key = winreg.OpenKey(root, path, 0, access)
+            try:
+                value, _ = winreg.QueryValueEx(key, name)
+                return True, value
+            finally:
+                winreg.CloseKey(key)
+        except FileNotFoundError:
+            return False, None
+        except Exception as e:
+            logger.error(f"读取环境变量失败: {e}")
+            return False, str(e)
+
+    @staticmethod
+    def get_all_env_vars(scope: str = "process") -> tuple[bool, dict[str, str] | str]:
+        """
+        获取指定范围的全部环境变量
+
+        Args:
+            scope: process/user/machine
+        """
+        scope = scope.lower()
+        if scope not in WindowsEnv._SCOPE_CHOICES:
+            return False, f"scope 仅支持 {WindowsEnv._SCOPE_CHOICES}"
+
+        if scope == "process":
+            return True, dict(os.environ)
+
+        try:
+            root, path = WindowsEnv._get_registry_info(scope)
+            access = winreg.KEY_READ | winreg.KEY_WOW64_64KEY
+            key = winreg.OpenKey(root, path, 0, access)
+            items: dict[str, str] = {}
+            try:
+                index = 0
+                while True:
+                    name, value, _ = winreg.EnumValue(key, index)
+                    items[name] = value
+                    index += 1
+            except OSError:
+                # EnumValue 抛出异常表示遍历结束
+                pass
+            finally:
+                winreg.CloseKey(key)
+
+            logger.info(f"获取全部环境变量: \n{json.dumps(items, indent=4)}")
+            return True, items
+
+        except Exception as e:
+            logger.error(f"获取全部环境变量失败: {e}")
+            return False, str(e)
+
+    @staticmethod
+    def set_env_var(
+        name: str,
+        value: str,
+        scope: str = "user",
+        update_process: bool = True,
+    ) -> tuple[bool, str]:
+        """
+        设置环境变量
+        Args:
+            name: 变量名
+            value: 变量值
+            scope: process/user/machine
+            update_process: 是否同步更新当前进程
+        """
+        scope = scope.lower()
+        if scope not in WindowsEnv._SCOPE_CHOICES:
+            return False, f"scope 仅支持 {WindowsEnv._SCOPE_CHOICES}"
+
+        if scope == "machine" and not WindowsEnv.is_admin():
+            return False, "设置系统级变量需要管理员权限"
+
+        try:
+            if scope == "process":
+                os.environ[name] = value
+                return True, "已更新当前进程环境变量"
+
+            root, path = WindowsEnv._get_registry_info(scope)
+            reg_type = winreg.REG_EXPAND_SZ if "%" in value else winreg.REG_SZ
+            access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY
+            key = winreg.OpenKey(root, path, 0, access)
+            try:
+                winreg.SetValueEx(key, name, 0, reg_type, value)
+            finally:
+                winreg.CloseKey(key)
+
+            if update_process:
+                os.environ[name] = value
+
+            WindowsEnv._broadcast_env_change()
+            return True, f"{scope} 环境变量已更新"
+
+        except PermissionError:
+            return False, "写入注册表失败：权限不足"
+        except Exception as e:
+            logger.error(f"设置环境变量失败: {e}")
+            return False, str(e)
+
+    @staticmethod
+    def append_env_var(
+        name: str,
+        value: str,
+        scope: str = "user",
+        delimiter: str = ";",
+        unique: bool = True,
+    ) -> tuple[bool, str]:
+        """
+        在现有环境变量末尾追加值，常用于 PATH
+        """
+        success, current = WindowsEnv.get_env_var(name, scope)
+        current_value = current or ""
+
+        parts = [p for p in current_value.split(delimiter) if p] if current_value else []
+        normalized = [p.lower() for p in parts]
+        target_lower = value.lower()
+
+        if unique and target_lower in normalized:
+            return True, f"{name} 已包含该值，无需追加"
+
+        parts.append(value)
+        new_value = delimiter.join(parts) if parts else value
+        return WindowsEnv.set_env_var(name, new_value, scope)
+
 
 if __name__ == "__main__":
     # 示例：测试各种打开终端的方法
@@ -448,44 +625,4 @@ if __name__ == "__main__":
     print("Windows 环境工具测试")
     print("=" * 50)
 
-    # 检查管理员权限
-    if WindowsEnv.is_admin():
-        print("✓ 当前以管理员身份运行")
-    else:
-        print("✗ 当前不是管理员权限")
-
-    print("\n选择测试功能：")
-    print("1. 打开 CMD")
-    print("2. 以管理员身份打开 CMD")
-    print("3. 打开 PowerShell")
-    print("4. 以管理员身份打开 PowerShell")
-    print("5. 安装 Chocolatey")
-    print("6. 卸载 Chocolatey")
-
-    choice = input("\n请输入选项 (1-6): ").strip()
-
-    if choice == "1":
-        print("\n正在打开 CMD...")
-        WindowsEnv.open_terminal(shell="cmd")
-    elif choice == "2":
-        print("\n正在以管理员身份打开 CMD...")
-        WindowsEnv.open_terminal(shell="cmd", as_admin=True)
-    elif choice == "3":
-        print("\n正在打开 PowerShell...")
-        WindowsEnv.open_terminal(shell="powershell")
-    elif choice == "4":
-        print("\n正在以管理员身份打开 PowerShell...")
-        WindowsEnv.open_terminal(shell="powershell", as_admin=True)
-    elif choice == "5":
-        print("\n正在安装 Chocolatey...")
-        success, message = WindowsEnv.install_choco()
-        print(f"{'✓' if success else '✗'} {message}")
-    elif choice == "6":
-        print("\n正在卸载 Chocolatey...")
-        success, message = WindowsEnv.uninstall_choco(auto_elevate=True)
-        print(f"{'✓' if success else '✗'} {message}")
-    else:
-        print("无效的选项！")
-
-    print("\n按回车键退出...")
-    input()
+    print(json.dumps(WindowsEnv.get_all_env_vars()[1], indent=4, ensure_ascii=False))
