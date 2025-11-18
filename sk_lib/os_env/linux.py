@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import tempfile
@@ -15,6 +16,7 @@ class LinuxEnv:
     """当前只支持centos操作系统"""
 
     def __init__(self, os_platform: OsPlatform, ip: str, username: str, password: str, port: int = 22):
+        logger.debug(f"初始化 LinuxEnv，os_platform: {os_platform}, ip: {ip}, username: {username}, password: {password}, port: {port}")
         self.ssh_tool = SSHTool(ip, port, username, password)
         if os_platform != OsPlatform.Centos:
             raise ValueError(f"当前仅支持Centos操作系统")
@@ -24,6 +26,22 @@ class LinuxEnv:
         # 转义单引号，防止命令注入（简单处理）
         safe_cmd = cmd.replace("'", "'\"'\"'")
         return f"script -qec '{safe_cmd}' /dev/null"
+
+    def _shell_escape_single_quotes(self, value: str) -> str:
+        """在单引号包裹的 shell 字符串中安全地插入内容"""
+        return value.replace("'", "'\"'\"'")
+
+    def _get_centos_major_version(self) -> str | None:
+        """获取 CentOS/RHEL 的主版本号（如 '7', '8', '9'）"""
+        cmd = (
+            "source /etc/os-release >/dev/null 2>&1 && "
+            "echo ${VERSION_ID:-''} | cut -d'.' -f1"
+        )
+        success, output = self.ssh_tool.run_cmd(cmd)
+        if success:
+            version = output.strip().strip('"').strip("'")
+            return version if version else None
+        return None
 
     def install_development_tools(self) -> bool:
         """安装 Development Tools 编译工具组（包含 gcc、make、glibc-devel 等编译依赖）
@@ -58,6 +76,220 @@ class LinuxEnv:
             return False
 
         logger.info("Development Tools 组安装成功（gcc 和 make 已可用）")
+        return True
+
+    def install_mysql8(self, root_password: str = "root", allow_remote_access: bool = True) -> bool:
+        """安装 MySQL 8 社区版
+
+        Args:
+            root_password: 可选，安装完成后设置 root@localhost 的新密码
+                           如果不提供，将保留 MySQL 默认生成的临时密码
+            allow_remote_access: 是否允许远程访问，默认 True
+                                如果为 True，将开放防火墙端口并配置 MySQL 允许远程连接
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info("开始安装 MySQL 8 ...")
+
+        if not self.clean_yum_process():
+            return False
+
+        major_version = self._get_centos_major_version()
+        repo_urls = {
+            "7": "https://repo.mysql.com/mysql80-community-release-el7-11.noarch.rpm",
+            "8": "https://repo.mysql.com/mysql80-community-release-el8-5.noarch.rpm",
+            "9": "https://repo.mysql.com/mysql80-community-release-el9-2.noarch.rpm",
+        }
+
+        repo_url = repo_urls.get(major_version or "", repo_urls["8"])
+        repo_pkg_name = os.path.basename(repo_url)
+
+        # 检查 mysql 社区源是否已经安装
+        logger.info("检测 mysql80-community-release 是否已安装...")
+        check_repo_cmd = (
+            "rpm -qa | grep -q mysql80-community-release && echo 'exists' || echo 'not_exists'"
+        )
+        success, output = self.ssh_tool.run_cmd(check_repo_cmd)
+        if not success:
+            logger.error(f"检测 MySQL repo 失败: {output}")
+            return False
+
+        if output.strip() != "exists":
+            logger.info("安装 mysql80-community-release 仓库...")
+            install_repo_cmd = self._wrap_cmd_with_pty(f"yum install -y {repo_url}")
+            success, output = self.ssh_tool.run_cmd(install_repo_cmd, realtime_output=True)
+            if not success:
+                logger.error(f"安装 MySQL 仓库失败: {output}")
+                return False
+        else:
+            logger.info("mysql80-community-release 已存在，跳过安装")
+
+        # 关闭系统自带 mysql 模块，避免冲突（CentOS 8+/Stream）
+        disable_module_cmd = "yum module disable -y mysql 2>/dev/null || true"
+        self.ssh_tool.run_cmd(disable_module_cmd)
+
+        logger.info("安装 mysql-community-server...")
+        install_mysql_cmd = self._wrap_cmd_with_pty("yum install -y mysql-community-server")
+        success, output = self.ssh_tool.run_cmd(install_mysql_cmd, realtime_output=True, timeout=1200)
+        if not success:
+            logger.error(f"MySQL 服务安装失败: {output}")
+            return False
+
+        # 配置 MySQL 允许远程访问（在启动前修改配置文件）
+        if allow_remote_access:
+            logger.info("配置 MySQL 允许远程访问...")
+            mysql_config_file = "/etc/my.cnf"
+            # 检查配置文件中是否已有 bind-address
+            check_bind_cmd = f"grep -q '^bind-address' {mysql_config_file} 2>/dev/null && echo 'exists' || echo 'not_exists'"
+            success, bind_output = self.ssh_tool.run_cmd(check_bind_cmd)
+            
+            if bind_output.strip() == "exists":
+                # 如果存在，注释掉或修改为 0.0.0.0
+                logger.info("修改 bind-address 配置...")
+                sed_cmd = f"sed -i 's/^bind-address.*/bind-address = 0.0.0.0/' {mysql_config_file}"
+                self.ssh_tool.run_cmd(sed_cmd)
+            else:
+                # 如果不存在，在 [mysqld] 段添加
+                logger.info("添加 bind-address 配置...")
+                # 检查是否有 [mysqld] 段
+                check_mysqld_cmd = f"grep -q '^\\[mysqld\\]' {mysql_config_file} 2>/dev/null && echo 'exists' || echo 'not_exists'"
+                success, mysqld_output = self.ssh_tool.run_cmd(check_mysqld_cmd)
+                
+                if mysqld_output.strip() == "exists":
+                    # 在 [mysqld] 段后添加 bind-address
+                    sed_cmd = f"sed -i '/^\\[mysqld\\]/a bind-address = 0.0.0.0' {mysql_config_file}"
+                    self.ssh_tool.run_cmd(sed_cmd)
+                else:
+                    # 如果没有 [mysqld] 段，添加整个段
+                    append_cmd = f"echo -e '\\n[mysqld]\\nbind-address = 0.0.0.0' >> {mysql_config_file}"
+                    self.ssh_tool.run_cmd(append_cmd)
+
+        logger.info("启动并设置 mysqld 服务开机自启...")
+        start_cmd = "systemctl enable --now mysqld"
+        success, output = self.ssh_tool.run_cmd(start_cmd)
+        if not success:
+            logger.error(f"启动 mysqld 服务失败: {output}")
+            return False
+
+        status_success, status_output = self.ssh_tool.run_cmd("systemctl is-active mysqld")
+        if not status_success or status_output.strip() != "active":
+            logger.error("mysqld 服务未正常运行")
+            return False
+
+        logger.info("MySQL 8 安装完成并已启动")
+
+        # 获取临时密码（如果需要设置密码或配置远程访问）
+        temp_password = None
+        if root_password or allow_remote_access:
+            logger.info("获取 MySQL 临时密码...")
+            temp_cmd = (
+                "grep 'temporary password' /var/log/mysqld.log | tail -1 | awk '{print $NF}'"
+            )
+            success, temp_output = self.ssh_tool.run_cmd(temp_cmd)
+            if not success or not temp_output.strip():
+                logger.error("无法获取 MySQL 临时密码，请手动检查 /var/log/mysqld.log")
+                return False
+            temp_password = temp_output.strip()
+
+        # 设置 root 密码
+        final_password = root_password
+        if root_password:
+            logger.info("尝试设置 MySQL root 密码...")
+            escaped_temp = self._shell_escape_single_quotes(temp_password)
+
+            sql_password = (
+                root_password.replace("\\", "\\\\")
+                .replace("'", "\\'")
+            )
+            sql_cmd = (
+                "SET GLOBAL validate_password.policy=LOW;"
+                "SET GLOBAL validate_password.length=6;"
+                f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{sql_password}';"
+                "FLUSH PRIVILEGES;"
+            )
+            sql_cmd = sql_cmd.replace('"', '\\"')
+
+            mysql_cmd = (
+                f"mysql --connect-expired-password -uroot -p'{escaped_temp}' -e \"{sql_cmd}\""
+            )
+            success, output = self.ssh_tool.run_cmd(mysql_cmd, timeout=120)
+            if not success:
+                logger.error(f"设置 root 密码失败: {output}")
+                return False
+
+            logger.info("root 密码设置完成")
+            final_password = root_password
+        elif allow_remote_access:
+            # 如果没有提供密码，使用临时密码进行后续配置
+            final_password = temp_password
+
+        # 配置远程访问
+        if allow_remote_access:
+            logger.info("配置 MySQL 允许远程连接...")
+            
+            # 使用最终密码（已设置的密码或临时密码）
+            if final_password:
+                escaped_password = self._shell_escape_single_quotes(final_password)
+                password_flag = f"-p'{escaped_password}'"
+            else:
+                password_flag = ""
+                escaped_password = ""
+
+            # 创建 root@'%' 用户或修改现有 root 用户允许远程连接
+            sql_cmds = [
+                "SET GLOBAL validate_password.policy=LOW;",
+                "SET GLOBAL validate_password.length=6;",
+            ]
+            
+            # 检查 root@'%' 用户是否已存在
+            check_user_cmd = f"mysql -uroot {password_flag} -e \"SELECT COUNT(*) as cnt FROM mysql.user WHERE User='root' AND Host='%';\" 2>&1"
+            success, user_output = self.ssh_tool.run_cmd(check_user_cmd, timeout=30)
+            
+            # 检查输出中是否包含数字 1（表示用户存在）
+            user_exists = success and "1" in user_output and "cnt" in user_output.lower()
+            
+            if user_exists:
+                # root@'%' 已存在，更新密码
+                logger.info("root@'%' 用户已存在，更新密码...")
+                if root_password:
+                    sql_password = root_password.replace("\\", "\\\\").replace("'", "\\'")
+                    sql_cmds.append(f"ALTER USER 'root'@'%' IDENTIFIED BY '{sql_password}';")
+                else:
+                    sql_cmds.append(f"ALTER USER 'root'@'%' IDENTIFIED BY '{escaped_password}';")
+            else:
+                # 创建 root@'%' 用户
+                logger.info("创建 root@'%' 用户...")
+                if root_password:
+                    sql_password = root_password.replace("\\", "\\\\").replace("'", "\\'")
+                    sql_cmds.append(f"CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '{sql_password}';")
+                else:
+                    sql_cmds.append(f"CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '{escaped_password}';")
+            
+            # 授予所有权限
+            sql_cmds.extend([
+                "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;",
+                "FLUSH PRIVILEGES;"
+            ])
+            
+            sql_cmd = " ".join(sql_cmds)
+            sql_cmd = sql_cmd.replace('"', '\\"')
+            
+            mysql_cmd = f"mysql -uroot {password_flag} -e \"{sql_cmd}\""
+            success, output = self.ssh_tool.run_cmd(mysql_cmd, timeout=120)
+            if not success:
+                logger.error(f"配置远程访问失败: {output}")
+                logger.warning("请手动配置 MySQL 远程访问")
+            else:
+                logger.info("MySQL 远程访问配置完成")
+
+            # 开放防火墙端口 3306
+            logger.info("开放防火墙端口 3306...")
+            if not self.open_port(3306, "tcp"):
+                logger.warning("开放防火墙端口失败，请手动检查防火墙配置")
+            else:
+                logger.info("防火墙端口 3306 已开放")
+
         return True
 
     def base_install(self) -> bool:
@@ -1066,7 +1298,7 @@ class LinuxEnv:
         """
         logger.info("开始更新系统包...")
 
-        if not linux_env.clean_yum_process():
+        if not self.clean_yum_process():
             return False
 
         # 根据不同的操作系统平台选择更新命令
@@ -2230,6 +2462,23 @@ class LinuxEnv:
 
 
 if __name__ == "__main__":
-    linux_env = LinuxEnv(os_platform=OsPlatform.Centos, ip="192.168.137.200", username="root", password="root")
-    # linux_env = LinuxEnv(os_platform=OsPlatform.Centos, ip="192.168.203.227", username="root", password="root")
-    linux_env.install_soft("nvm")
+    """
+    $env:PYTHONPATH="C:\code\github\shikou-lib;$env:PYTHONPATH"; py -m sk_lib.os_env.linux --ip 192.168.137.167
+    """
+
+    parser = argparse.ArgumentParser(description="Linux 环境运维工具")
+    parser.add_argument("--ip", default="192.168.137.0", help="目标服务器 IP 地址")
+    parser.add_argument("--username", default="root", help="SSH 登录用户名")
+    parser.add_argument("--password", default="root", help="SSH 登录密码")
+    parser.add_argument("--port", type=int, default=22, help="SSH 端口，默认 22")
+    args = parser.parse_args()
+
+    linux_env = LinuxEnv(
+        os_platform=OsPlatform.Centos,
+        ip=args.ip,
+        username=args.username,
+        password=args.password,
+        port=args.port,
+    )
+    linux_env.replace_yum_repos()
+    linux_env.install_mysql8()
