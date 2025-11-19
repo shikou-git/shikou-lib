@@ -107,7 +107,6 @@ class SSHTool:
             tuple[bool, str]: (是否成功, 命令输出/错误信息)
         """
         try:
-            logger.info(f"执行命令: {command}")
             stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
 
             if realtime_output:
@@ -169,7 +168,7 @@ class SSHTool:
                 exit_status = stdout.channel.recv_exit_status()
 
             if exit_status != 0 and error:
-                logger.error(f"执行命令失败 (exit_code={exit_status}): \n{error if error else output}")
+                logger.error(f"执行命令失败：{command} (exit_code={exit_status}): \n{error if error else output}")
                 return False, error
 
             logger.info(f"执行命令成功: {command}")
