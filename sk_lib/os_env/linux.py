@@ -15,8 +15,17 @@ from sk_lib.public.enums import OsPlatform
 class LinuxEnv:
     """当前只支持centos操作系统"""
 
-    def __init__(self, os_platform: OsPlatform, ip: str, username: str, password: str, port: int = 22):
-        logger.debug(f"初始化 LinuxEnv，os_platform: {os_platform}, ip: {ip}, username: {username}, password: {password}, port: {port}")
+    def __init__(
+        self,
+        os_platform: OsPlatform,
+        ip: str,
+        username: str,
+        password: str,
+        port: int = 22,
+    ):
+        logger.debug(
+            f"初始化 LinuxEnv，os_platform: {os_platform}, ip: {ip}, username: {username}, password: {password}, port: {port}"
+        )
         self.ssh_tool = SSHTool(ip, port, username, password)
         if os_platform != OsPlatform.Centos:
             raise ValueError(f"当前仅支持Centos操作系统")
@@ -52,7 +61,9 @@ class LinuxEnv:
         logger.info("安装 Development Tools 编译工具组...")
         group_install_cmd = "yum groupinstall -y 'Development Tools'"
         group_install_cmd_stream = self._wrap_cmd_with_pty(group_install_cmd)
-        success, output = self.ssh_tool.run_cmd(group_install_cmd_stream, realtime_output=True)
+        success, output = self.ssh_tool.run_cmd(
+            group_install_cmd_stream, realtime_output=True
+        )
         if not success:
             logger.error(f"Development Tools 组安装失败: {output}")
             return False
@@ -72,16 +83,16 @@ class LinuxEnv:
                 missing_tools.append(tool)
 
         if missing_tools:
-            logger.error(f"Development Tools 组安装失败：以下工具未找到 {missing_tools}")
+            logger.error(
+                f"Development Tools 组安装失败：以下工具未找到 {missing_tools}"
+            )
             return False
 
         logger.info("Development Tools 组安装成功（gcc 和 make 已可用）")
         return True
 
     def install_mysql8(
-        self, 
-        root_password: str = "Db@123456", 
-        allow_remote_access: bool = True
+        self, root_password: str = "Db@123456", allow_remote_access: bool = True
     ) -> bool:
         """安装 MySQL 8 社区版
 
@@ -111,9 +122,7 @@ class LinuxEnv:
 
         # 检查 mysql 社区源是否已经安装
         logger.info("检测 mysql80-community-release 是否已安装...")
-        check_repo_cmd = (
-            "rpm -qa | grep -q mysql80-community-release && echo 'exists' || echo 'not_exists'"
-        )
+        check_repo_cmd = "rpm -qa | grep -q mysql80-community-release && echo 'exists' || echo 'not_exists'"
         success, output = self.ssh_tool.run_cmd(check_repo_cmd)
         if not success:
             logger.error(f"检测 MySQL repo 失败: {output}")
@@ -122,7 +131,9 @@ class LinuxEnv:
         if output.strip() != "exists":
             logger.info("安装 mysql80-community-release 仓库...")
             install_repo_cmd = self._wrap_cmd_with_pty(f"yum install -y {repo_url}")
-            success, output = self.ssh_tool.run_cmd(install_repo_cmd, realtime_output=True)
+            success, output = self.ssh_tool.run_cmd(
+                install_repo_cmd, realtime_output=True
+            )
             if not success:
                 logger.error(f"安装 MySQL 仓库失败: {output}")
                 return False
@@ -135,15 +146,21 @@ class LinuxEnv:
 
         logger.info("安装 mysql-community-server...")
         # 使用 --nogpgcheck 跳过 GPG 密钥检查（MySQL 官方仓库的密钥可能未正确导入）
-        install_mysql_cmd = self._wrap_cmd_with_pty("yum install -y --nogpgcheck mysql-community-server")
-        success, output = self.ssh_tool.run_cmd(install_mysql_cmd, realtime_output=True, timeout=1200)
+        install_mysql_cmd = self._wrap_cmd_with_pty(
+            "yum install -y --nogpgcheck mysql-community-server"
+        )
+        success, output = self.ssh_tool.run_cmd(
+            install_mysql_cmd, realtime_output=True, timeout=1200
+        )
         if not success:
             logger.error(f"MySQL 服务安装失败: {output}")
             return False
-        
+
         # 验证 MySQL 是否真的安装成功
         logger.info("验证 MySQL 安装...")
-        check_install_cmd = "rpm -q mysql-community-server && echo 'installed' || echo 'not_installed'"
+        check_install_cmd = (
+            "rpm -q mysql-community-server && echo 'installed' || echo 'not_installed'"
+        )
         check_success, check_output = self.ssh_tool.run_cmd(check_install_cmd)
         if not check_success or "installed" not in check_output:
             logger.error("MySQL 安装验证失败，包未正确安装")
@@ -152,20 +169,22 @@ class LinuxEnv:
 
         # 检查并创建 mysql 用户和组
         logger.info("检查 mysql 用户和组...")
-        check_user_cmd = "id mysql >/dev/null 2>&1 && echo 'exists' || echo 'not_exists'"
+        check_user_cmd = (
+            "id mysql >/dev/null 2>&1 && echo 'exists' || echo 'not_exists'"
+        )
         success, user_output = self.ssh_tool.run_cmd(check_user_cmd)
-        
+
         if user_output.strip() == "not_exists":
             logger.warning("mysql 用户不存在，正在创建...")
-            
+
             # 创建 mysql 组
             create_group_cmd = "groupadd -r mysql 2>&1 || true"
             self.ssh_tool.run_cmd(create_group_cmd)
-            
+
             # 创建 mysql 用户（系统用户，不允许登录）
             create_user_cmd = "useradd -r -g mysql -s /bin/false -M mysql 2>&1 || true"
             success, output = self.ssh_tool.run_cmd(create_user_cmd)
-            
+
             # 验证用户是否创建成功
             success, verify_output = self.ssh_tool.run_cmd(check_user_cmd)
             if verify_output.strip() == "exists":
@@ -181,7 +200,7 @@ class LinuxEnv:
         data_dir = "/var/lib/mysql"
         check_dir_cmd = f"test -d {data_dir} && echo 'exists' || echo 'not_exists'"
         success, dir_output = self.ssh_tool.run_cmd(check_dir_cmd)
-        
+
         if dir_output.strip() == "not_exists":
             logger.info(f"数据目录不存在，正在创建: {data_dir}")
             mkdir_cmd = f"mkdir -p {data_dir}"
@@ -200,12 +219,12 @@ class LinuxEnv:
         if not success:
             logger.error(f"设置数据目录权限失败: {output}")
             return False
-        
+
         chmod_cmd = f"chmod 750 {data_dir}"
         success, output = self.ssh_tool.run_cmd(chmod_cmd)
         if not success:
             logger.warning(f"设置数据目录权限模式失败: {output}")
-        
+
         logger.info("数据目录权限设置完成")
 
         # 设置 SELinux 上下文（CentOS/RHEL 需要）
@@ -213,14 +232,16 @@ class LinuxEnv:
         # 先检查 SELinux 是否启用
         selinux_check_cmd = "getenforce 2>/dev/null || echo 'Disabled'"
         success, selinux_status = self.ssh_tool.run_cmd(selinux_check_cmd)
-        
+
         if selinux_status.strip() in ["Enforcing", "Permissive"]:
-            logger.info(f"SELinux 状态: {selinux_status.strip()}，正在设置数据目录上下文...")
-            
+            logger.info(
+                f"SELinux 状态: {selinux_status.strip()}，正在设置数据目录上下文..."
+            )
+
             # 检查 semanage 命令是否可用
             semanage_check = "which semanage >/dev/null 2>&1 && echo 'available' || echo 'not_available'"
             success, semanage_status = self.ssh_tool.run_cmd(semanage_check)
-            
+
             if semanage_status.strip() == "available":
                 # 使用 semanage 设置持久化的 SELinux 上下文（推荐）
                 logger.debug("使用 semanage 设置 SELinux 上下文...")
@@ -228,11 +249,15 @@ class LinuxEnv:
                 self.ssh_tool.run_cmd(selinux_cmd)
             else:
                 # 如果 semanage 不可用，使用 chcon（临时方法，重启后可能失效）
-                logger.warning("semanage 命令不可用，使用 chcon 临时设置 SELinux 上下文")
-                logger.warning("提示：安装 policycoreutils-python-utils 包可获得 semanage 命令")
+                logger.warning(
+                    "semanage 命令不可用，使用 chcon 临时设置 SELinux 上下文"
+                )
+                logger.warning(
+                    "提示：安装 policycoreutils-python-utils 包可获得 semanage 命令"
+                )
                 chcon_cmd = f"chcon -R -t mysqld_db_t {data_dir} 2>&1 || true"
                 self.ssh_tool.run_cmd(chcon_cmd)
-            
+
             # 应用 SELinux 上下文（使用 restorecon 或 chcon）
             restorecon_cmd = f"restorecon -R {data_dir} 2>&1"
             success, output = self.ssh_tool.run_cmd(restorecon_cmd)
@@ -252,53 +277,63 @@ class LinuxEnv:
 
         # 初始化 MySQL 数据目录（如果为空）
         logger.info("检查数据目录是否需要初始化...")
-        check_init_cmd = f"ls -A {data_dir} | grep -q '.' && echo 'not_empty' || echo 'empty'"
+        check_init_cmd = (
+            f"ls -A {data_dir} | grep -q '.' && echo 'not_empty' || echo 'empty'"
+        )
         success, init_output = self.ssh_tool.run_cmd(check_init_cmd)
-        
+
         if init_output.strip() == "empty":
             logger.info("数据目录为空，正在初始化 MySQL 数据目录...")
             # 使用 mysqld --initialize-insecure 初始化（不生成随机密码，root 初始密码为空）
             # 这样后续可以直接设置密码，无需获取临时密码
-            init_cmd = f"mysqld --initialize-insecure --user=mysql --datadir={data_dir} 2>&1"
+            init_cmd = (
+                f"mysqld --initialize-insecure --user=mysql --datadir={data_dir} 2>&1"
+            )
             success, output = self.ssh_tool.run_cmd(init_cmd, timeout=120)
-            
+
             if not success:
                 logger.error(f"MySQL 数据目录初始化失败: {output}")
                 # 如果初始化失败，尝试使用传统方法
                 logger.info("尝试使用 mysql_install_db 初始化...")
-                alt_init_cmd = f"mysql_install_db --user=mysql --datadir={data_dir} 2>&1"
+                alt_init_cmd = (
+                    f"mysql_install_db --user=mysql --datadir={data_dir} 2>&1"
+                )
                 success, output = self.ssh_tool.run_cmd(alt_init_cmd, timeout=120)
                 if not success:
                     logger.error(f"mysql_install_db 初始化也失败: {output}")
                     return False
-            
+
             # 初始化后再次设置权限和 SELinux 上下文
             logger.info("重新设置数据目录权限...")
             self.ssh_tool.run_cmd(f"chown -R mysql:mysql {data_dir}")
-            
+
             if selinux_status.strip() in ["Enforcing", "Permissive"]:
                 logger.info("重新应用 SELinux 上下文...")
                 # 尝试使用 restorecon
-                success, output = self.ssh_tool.run_cmd(f"restorecon -R {data_dir} 2>&1")
+                success, output = self.ssh_tool.run_cmd(
+                    f"restorecon -R {data_dir} 2>&1"
+                )
                 if not success:
                     # 如果 restorecon 失败，使用 chcon
                     logger.debug("使用 chcon 设置上下文...")
-                    self.ssh_tool.run_cmd(f"chcon -R -t mysqld_db_t {data_dir} 2>&1 || true")
-            
+                    self.ssh_tool.run_cmd(
+                        f"chcon -R -t mysqld_db_t {data_dir} 2>&1 || true"
+                    )
+
             logger.info("MySQL 数据目录初始化成功")
         else:
             logger.info("数据目录已初始化，跳过初始化步骤")
 
         # 配置 MySQL 认证插件（在启动前修改配置文件）
         mysql_config_file = "/etc/my.cnf"
-    
+
         # 配置 MySQL 允许远程访问（在启动前修改配置文件）
         if allow_remote_access:
             logger.info("配置 MySQL 允许远程访问...")
             # 检查配置文件中是否已有 bind-address
             check_bind_cmd = f"grep -q '^bind-address' {mysql_config_file} 2>/dev/null && echo 'exists' || echo 'not_exists'"
             success, bind_output = self.ssh_tool.run_cmd(check_bind_cmd)
-            
+
             if bind_output.strip() == "exists":
                 # 如果存在，注释掉或修改为 0.0.0.0
                 logger.info("修改 bind-address 配置...")
@@ -310,7 +345,7 @@ class LinuxEnv:
                 # 检查是否有 [mysqld] 段
                 check_mysqld_cmd = f"grep -q '^\\[mysqld\\]' {mysql_config_file} 2>/dev/null && echo 'exists' || echo 'not_exists'"
                 success, mysqld_output = self.ssh_tool.run_cmd(check_mysqld_cmd)
-                
+
                 if mysqld_output.strip() == "exists":
                     # 在 [mysqld] 段后添加 bind-address
                     sed_cmd = f"sed -i '/^\\[mysqld\\]/a bind-address = 0.0.0.0' {mysql_config_file}"
@@ -325,68 +360,68 @@ class LinuxEnv:
         success, output = self.ssh_tool.run_cmd(start_cmd)
         if not success:
             logger.error(f"启动 mysqld 服务失败: {output}")
-            
+
             # 收集详细的错误信息
             logger.error("=" * 70)
             logger.error("📋 开始诊断 MySQL 启动失败原因...")
             logger.error("=" * 70)
-            
+
             # 1. 查看 systemctl status
             logger.error("\n1️⃣ 查看服务状态 (systemctl status mysqld):")
             status_cmd = "systemctl status mysqld --no-pager -l"
             status_success, status_output = self.ssh_tool.run_cmd(status_cmd)
             if status_success or status_output.strip():
                 logger.error(status_output)
-            
+
             # 2. 查看 MySQL 错误日志
             logger.error("\n2️⃣ 查看 MySQL 错误日志 (最后 50 行):")
             log_cmd = "tail -50 /var/log/mysqld.log 2>&1 || echo '日志文件不存在'"
             log_success, log_output = self.ssh_tool.run_cmd(log_cmd)
             if log_output.strip():
                 logger.error(log_output)
-            
+
             # 3. 查看 journalctl 日志
             logger.error("\n3️⃣ 查看系统日志 (journalctl -xeu mysqld):")
             journal_cmd = "journalctl -xeu mysqld.service --no-pager -n 30 2>&1"
             journal_success, journal_output = self.ssh_tool.run_cmd(journal_cmd)
             if journal_output.strip():
                 logger.error(journal_output)
-            
+
             # 4. 检查数据目录权限
             logger.error("\n4️⃣ 检查数据目录权限:")
             perm_cmd = "ls -ld /var/lib/mysql 2>&1"
             perm_success, perm_output = self.ssh_tool.run_cmd(perm_cmd)
             if perm_output.strip():
                 logger.error(perm_output)
-            
+
             # 5. 检查端口占用
             logger.error("\n5️⃣ 检查 3306 端口是否被占用:")
             port_cmd = "netstat -tuln | grep :3306 || ss -tuln | grep :3306 || echo '端口未被占用'"
             port_success, port_output = self.ssh_tool.run_cmd(port_cmd)
             if port_output.strip():
                 logger.error(port_output)
-            
+
             # 6. 检查磁盘空间
             logger.error("\n6️⃣ 检查磁盘空间:")
             disk_cmd = "df -h /var/lib/mysql"
             disk_success, disk_output = self.ssh_tool.run_cmd(disk_cmd)
             if disk_output.strip():
                 logger.error(disk_output)
-            
+
             # 7. 检查内存
             logger.error("\n7️⃣ 检查内存使用情况:")
             mem_cmd = "free -h"
             mem_success, mem_output = self.ssh_tool.run_cmd(mem_cmd)
             if mem_output.strip():
                 logger.error(mem_output)
-            
+
             # 8. 检查 SELinux 状态和上下文
             logger.error("\n8️⃣ 检查 SELinux 状态:")
             selinux_status_cmd = "getenforce 2>/dev/null || echo 'Not installed'"
             selinux_success, selinux_output = self.ssh_tool.run_cmd(selinux_status_cmd)
             if selinux_output.strip():
                 logger.error(f"SELinux 状态: {selinux_output.strip()}")
-            
+
             # 检查数据目录的 SELinux 上下文
             if selinux_output.strip() in ["Enforcing", "Permissive"]:
                 logger.error("\n   检查 /var/lib/mysql 的 SELinux 上下文:")
@@ -394,28 +429,32 @@ class LinuxEnv:
                 context_success, context_output = self.ssh_tool.run_cmd(context_cmd)
                 if context_output.strip():
                     logger.error(f"   {context_output}")
-                
+
                 # 检查 SELinux 拒绝日志
                 logger.error("\n   检查 SELinux 拒绝日志:")
                 ausearch_cmd = "ausearch -m avc -ts recent 2>&1 | grep mysqld | tail -5 || echo '未发现相关拒绝记录'"
                 ausearch_success, ausearch_output = self.ssh_tool.run_cmd(ausearch_cmd)
                 if ausearch_output.strip():
                     logger.error(f"   {ausearch_output}")
-            
+
             logger.error("=" * 70)
             logger.error("💡 常见解决方案：")
-            logger.error("   1. 如果是数据目录初始化失败，可尝试删除 /var/lib/mysql 后重新安装")
+            logger.error(
+                "   1. 如果是数据目录初始化失败，可尝试删除 /var/lib/mysql 后重新安装"
+            )
             logger.error("   2. 如果是权限问题，检查 mysql 用户是否有权限访问数据目录")
             logger.error("      chown -R mysql:mysql /var/lib/mysql")
             logger.error("      chmod 750 /var/lib/mysql")
             logger.error("   3. 如果是 SELinux 问题（Permission denied, errno 13）：")
-            logger.error("      semanage fcontext -a -t mysqld_db_t '/var/lib/mysql(/.*)?'")
+            logger.error(
+                "      semanage fcontext -a -t mysqld_db_t '/var/lib/mysql(/.*)?'"
+            )
             logger.error("      restorecon -R /var/lib/mysql")
             logger.error("   4. 如果是端口占用，停止占用 3306 端口的进程")
             logger.error("   5. 如果是磁盘空间不足，清理磁盘空间")
             logger.error("   6. 如果是内存不足，增加系统内存或调整 MySQL 配置")
             logger.error("=" * 70)
-            
+
             return False
 
         # 等待 MySQL 服务完全启动
@@ -424,21 +463,27 @@ class LinuxEnv:
         wait_interval = 2
         for i in range(max_wait // wait_interval):
             time.sleep(wait_interval)
-            
+
             # 检查服务状态
-            status_success, status_output = self.ssh_tool.run_cmd("systemctl is-active mysqld")
+            status_success, status_output = self.ssh_tool.run_cmd(
+                "systemctl is-active mysqld"
+            )
             if not status_success or status_output.strip() != "active":
                 logger.warning(f"MySQL 服务状态: {status_output.strip()}")
                 continue
-            
+
             # 检查 socket 文件是否存在
             socket_check_cmd = "test -S /var/lib/mysql/mysql.sock && echo 'exists' || echo 'not_exists'"
             sock_success, sock_output = self.ssh_tool.run_cmd(socket_check_cmd)
             if sock_success and sock_output.strip() == "exists":
-                logger.info(f"MySQL 服务已完全启动（耗时: {(i + 1) * wait_interval} 秒）")
+                logger.info(
+                    f"MySQL 服务已完全启动（耗时: {(i + 1) * wait_interval} 秒）"
+                )
                 break
-            
-            logger.debug(f"等待 MySQL socket 文件创建... ({(i + 1) * wait_interval}/{max_wait} 秒)")
+
+            logger.debug(
+                f"等待 MySQL socket 文件创建... ({(i + 1) * wait_interval}/{max_wait} 秒)"
+            )
         else:
             # 超时，检查日志
             logger.error("MySQL 服务启动超时")
@@ -453,7 +498,9 @@ class LinuxEnv:
 
         # 由于使用 --initialize-insecure 初始化，root 用户初始密码为空
         temp_password = ""
-        logger.info("MySQL 使用空密码初始化（--initialize-insecure），root 用户初始密码为空")
+        logger.info(
+            "MySQL 使用空密码初始化（--initialize-insecure），root 用户初始密码为空"
+        )
 
         # 设置 root 密码
         final_password = root_password
@@ -462,28 +509,29 @@ class LinuxEnv:
 
             # 由于初始密码为空，直接使用空密码登录
             mysql_auth = "-uroot"
-            
+
             # 转义密码中的特殊字符
-            sql_password = (
-                root_password.replace("\\", "\\\\")
-                .replace("'", "\\'")
-            )
-            
+            sql_password = root_password.replace("\\", "\\\\").replace("'", "\\'")
+
             sql_cmd = (
                 f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{sql_password}';"
                 "FLUSH PRIVILEGES;"
             )
             sql_cmd = sql_cmd.replace('"', '\\"')
 
-            mysql_cmd = f"mysql {mysql_auth} -e \"{sql_cmd}\""
+            mysql_cmd = f'mysql {mysql_auth} -e "{sql_cmd}"'
             success, output = self.ssh_tool.run_cmd(mysql_cmd, timeout=120)
 
             if not success:
                 logger.error(f"设置 root 密码失败: {output}")
                 # 如果密码策略导致失败，提供建议
-                if "password" in output.lower() and ("policy" in output.lower() or "requirements" in output.lower()):
+                if "password" in output.lower() and (
+                    "policy" in output.lower() or "requirements" in output.lower()
+                ):
                     logger.error("密码不符合 MySQL 密码策略要求")
-                    logger.error("建议：使用包含大小写字母、数字和特殊字符的强密码，长度至少8位")
+                    logger.error(
+                        "建议：使用包含大小写字母、数字和特殊字符的强密码，长度至少8位"
+                    )
                     logger.error("例如：Db@123456 或 Root@123456")
                 return False
 
@@ -496,7 +544,7 @@ class LinuxEnv:
         # 配置远程访问
         if allow_remote_access:
             logger.info("配置 MySQL 允许远程连接...")
-            
+
             # 使用最终密码（已设置的密码或临时密码）
             # 注意：final_password 可能是空字符串（空密码），需要特殊处理
             if final_password is not None and final_password != "":
@@ -510,22 +558,30 @@ class LinuxEnv:
             # 创建 root@'%' 用户或修改现有 root 用户允许远程连接
             # 注意：不再设置密码策略，因为在前面设置密码时可能已经处理过了
             sql_cmds = []
-            
+
             # 检查 root@'%' 用户是否已存在
             check_user_cmd = f"mysql -uroot {password_flag} -e \"SELECT COUNT(*) as cnt FROM mysql.user WHERE User='root' AND Host='%';\" 2>&1"
             success, user_output = self.ssh_tool.run_cmd(check_user_cmd, timeout=30)
-            
+
             # 检查输出中是否包含数字 1（表示用户存在）
-            user_exists = success and "1" in user_output and "cnt" in user_output.lower()
-            
+            user_exists = (
+                success and "1" in user_output and "cnt" in user_output.lower()
+            )
+
             if user_exists:
                 # root@'%' 已存在，更新密码
                 logger.info("root@'%' 用户已存在，更新密码...")
                 if root_password:
-                    sql_password = root_password.replace("\\", "\\\\").replace("'", "\\'")
-                    sql_cmds.append(f"ALTER USER 'root'@'%' IDENTIFIED BY '{sql_password}';")
+                    sql_password = root_password.replace("\\", "\\\\").replace(
+                        "'", "\\'"
+                    )
+                    sql_cmds.append(
+                        f"ALTER USER 'root'@'%' IDENTIFIED BY '{sql_password}';"
+                    )
                 elif escaped_password:
-                    sql_cmds.append(f"ALTER USER 'root'@'%' IDENTIFIED BY '{escaped_password}';")
+                    sql_cmds.append(
+                        f"ALTER USER 'root'@'%' IDENTIFIED BY '{escaped_password}';"
+                    )
                 else:
                     # 空密码，不设置密码（保持原样）
                     logger.warning("未提供密码，跳过密码设置")
@@ -533,24 +589,32 @@ class LinuxEnv:
                 # 创建 root@'%' 用户
                 logger.info("创建 root@'%' 用户...")
                 if root_password:
-                    sql_password = root_password.replace("\\", "\\\\").replace("'", "\\'")
-                    sql_cmds.append(f"CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '{sql_password}';")
+                    sql_password = root_password.replace("\\", "\\\\").replace(
+                        "'", "\\'"
+                    )
+                    sql_cmds.append(
+                        f"CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '{sql_password}';"
+                    )
                 elif escaped_password:
-                    sql_cmds.append(f"CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '{escaped_password}';")
+                    sql_cmds.append(
+                        f"CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '{escaped_password}';"
+                    )
                 else:
                     # 空密码，创建无密码用户
                     sql_cmds.append("CREATE USER IF NOT EXISTS 'root'@'%';")
-            
+
             # 授予所有权限
-            sql_cmds.extend([
-                "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;",
-                "FLUSH PRIVILEGES;"
-            ])
-            
+            sql_cmds.extend(
+                [
+                    "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;",
+                    "FLUSH PRIVILEGES;",
+                ]
+            )
+
             sql_cmd = " ".join(sql_cmds)
             sql_cmd = sql_cmd.replace('"', '\\"')
-            
-            mysql_cmd = f"mysql -uroot {password_flag} -e \"{sql_cmd}\""
+
+            mysql_cmd = f'mysql -uroot {password_flag} -e "{sql_cmd}"'
             success, output = self.ssh_tool.run_cmd(mysql_cmd, timeout=120)
             if not success:
                 logger.error(f"配置远程访问失败: {output}")
@@ -583,7 +647,9 @@ class LinuxEnv:
         logger.info("💡 客户端连接示例：")
         logger.info("")
         logger.info("   JDBC 连接字符串（需要添加 allowPublicKeyRetrieval=true）：")
-        logger.info(f"   jdbc:mysql://{self.ssh_tool.ip}:3306/database?allowPublicKeyRetrieval=true&useSSL=false")
+        logger.info(
+            f"   jdbc:mysql://{self.ssh_tool.ip}:3306/database?allowPublicKeyRetrieval=true&useSSL=false"
+        )
         logger.info("")
         logger.info("   Python (mysql-connector)：")
         logger.info("   connection = mysql.connector.connect(")
@@ -599,13 +665,321 @@ class LinuxEnv:
         logger.info("")
         logger.info("📖 如果遇到 'Public Key Retrieval is not allowed' 错误：")
         logger.info("   方案1：在连接字符串中添加 allowPublicKeyRetrieval=true")
-        
+
         logger.info("")
         logger.info("=" * 70)
-        
+
         return True
 
-    def uninstall_mysql8(self, remove_data: bool = True, remove_config: bool = True, remove_repo: bool = False, remove_cache: bool = False) -> bool:
+    def install_nginx(self) -> bool:
+        """安装 Nginx Web 服务器
+
+        Returns:
+            bool: 成功返回 True,失败返回 False
+        """
+        logger.info("开始安装 Nginx...")
+
+        # 检查 Nginx 是否已安装
+        is_installed, _ = self._check_package_installed("nginx")
+        if is_installed:
+            logger.info("Nginx 已安装，跳过安装步骤")
+            # 检查服务状态，如果未启动则启动
+            status = self.service_status("nginx")
+            if status != "active":
+                logger.info("启动 Nginx 服务...")
+                if not self.service_start("nginx"):
+                    logger.error("启动 Nginx 服务失败")
+                    return False
+            # 确保服务开机自启
+            if not self.service_enable("nginx"):
+                logger.warning("设置 Nginx 开机自启失败")
+
+            # 确保防火墙端口已开放以允许局域网访问
+            logger.info("检查并开放防火墙端口以允许局域网访问...")
+            # 开放 HTTP 端口 80
+            if not self.open_port(80, "tcp"):
+                logger.warning("开放防火墙端口 80 失败，请手动检查防火墙配置")
+            else:
+                logger.info("防火墙端口 80 已开放")
+
+            # 开放 HTTPS 端口 443
+            if not self.open_port(443, "tcp"):
+                logger.warning("开放防火墙端口 443 失败，请手动检查防火墙配置")
+            else:
+                logger.info("防火墙端口 443 已开放")
+
+            return True
+
+        # 步骤 1：确保 EPEL 仓库已安装（Nginx 在 EPEL 仓库中）
+        logger.info("检查并安装 EPEL 仓库...")
+        epel_installed, _ = self._check_package_installed("epel-release")
+        if not epel_installed:
+            logger.info("EPEL 仓库未安装，正在安装...")
+            if not self._yum_install("epel-release"):
+                logger.error("EPEL 仓库安装失败")
+                return False
+            logger.info("EPEL 仓库安装成功")
+        else:
+            logger.info("EPEL 仓库已安装")
+
+        # 步骤 2：检查 yum 配置中是否有 exclude 规则
+        logger.info("检查 yum 配置中的 exclude 规则...")
+        check_exclude_cmd = "grep -i '^exclude' /etc/yum.conf /etc/dnf/dnf.conf 2>/dev/null || echo 'no_exclude'"
+        success, exclude_output = self.ssh_tool.run_cmd(check_exclude_cmd)
+        
+        if success and "nginx" in exclude_output.lower() and "no_exclude" not in exclude_output:
+            logger.warning(f"发现 yum exclude 规则包含 nginx: {exclude_output}")
+            logger.info("尝试临时移除 exclude 规则...")
+            # 备份配置文件
+            self.ssh_tool.run_cmd("cp /etc/yum.conf /etc/yum.conf.bak 2>/dev/null || true")
+            self.ssh_tool.run_cmd("cp /etc/dnf/dnf.conf /etc/dnf/dnf.conf.bak 2>/dev/null || true")
+            # 临时注释掉 exclude 规则
+            self.ssh_tool.run_cmd("sed -i 's/^exclude/#exclude/' /etc/yum.conf 2>/dev/null || true")
+            self.ssh_tool.run_cmd("sed -i 's/^exclude/#exclude/' /etc/dnf/dnf.conf 2>/dev/null || true")
+            logger.info("已临时禁用 exclude 规则")
+
+        # 步骤 3：清理并重建 yum 缓存
+        logger.info("清理并重建 yum 缓存...")
+        clean_cmd = self._wrap_cmd_with_pty("yum clean all")
+        self.ssh_tool.run_cmd(clean_cmd, realtime_output=True)
+        
+        makecache_cmd = self._wrap_cmd_with_pty("yum makecache")
+        self.ssh_tool.run_cmd(makecache_cmd, realtime_output=True)
+
+        # 步骤 4：检查 nginx 是否在可用的仓库中
+        logger.info("检查 nginx 是否在可用的仓库中...")
+        check_available_cmd = "yum list available nginx 2>&1"
+        success, available_output = self.ssh_tool.run_cmd(check_available_cmd)
+        
+        if "no matching packages" in available_output.lower() or "error" in available_output.lower():
+            logger.warning(f"nginx 在默认仓库中不可用: {available_output}")
+            
+            # 尝试搜索 nginx 包
+            logger.info("尝试搜索 nginx 相关包...")
+            search_cmd = "yum search nginx 2>&1 | head -20"
+            success, search_output = self.ssh_tool.run_cmd(search_cmd)
+            if success and search_output.strip():
+                logger.info(f"搜索结果:\n{search_output}")
+            
+            # 列出所有可用的仓库
+            logger.info("列出所有可用的仓库...")
+            repolist_cmd = "yum repolist all 2>&1 | grep -E 'repo id|epel'"
+            success, repolist_output = self.ssh_tool.run_cmd(repolist_cmd)
+            if success and repolist_output.strip():
+                logger.info(f"仓库列表:\n{repolist_output}")
+            
+            # 尝试启用 EPEL 仓库（可能被禁用了）
+            logger.info("尝试启用 EPEL 仓库...")
+            enable_epel_cmd = "yum-config-manager --enable epel 2>&1 || dnf config-manager --set-enabled epel 2>&1"
+            self.ssh_tool.run_cmd(enable_epel_cmd)
+            
+            # 再次重建缓存
+            logger.info("重新构建缓存...")
+            self.ssh_tool.run_cmd(makecache_cmd, realtime_output=True)
+        
+        # 安装 Nginx
+        logger.info("安装 Nginx 软件包...")
+        if not self.install_soft("nginx"):
+            logger.error("Nginx 安装失败")
+            logger.error("=" * 70)
+            logger.error("💡 故障排查建议：")
+            logger.error("")
+            logger.error("1. 检查 EPEL 仓库是否正确配置：")
+            logger.error("   yum repolist")
+            logger.error("")
+            logger.error("2. 手动尝试安装：")
+            logger.error("   yum install epel-release")
+            logger.error("   yum install nginx")
+            logger.error("")
+            logger.error("3. 检查 yum exclude 配置：")
+            logger.error("   grep exclude /etc/yum.conf")
+            logger.error("   grep exclude /etc/dnf/dnf.conf")
+            logger.error("")
+            logger.error("4. 对于 CentOS Stream 9，可能需要使用其他源：")
+            logger.error("   dnf install nginx")
+            logger.error("=" * 70)
+            return False
+
+        # 启动 Nginx 服务
+        logger.info("启动 Nginx 服务...")
+        if not self.service_start("nginx"):
+            logger.error("启动 Nginx 服务失败")
+            return False
+
+        # 设置 Nginx 服务开机自启
+        logger.info("设置 Nginx 服务开机自启...")
+        if not self.service_enable("nginx"):
+            logger.warning("设置 Nginx 开机自启失败，但不影响当前使用")
+
+        # 开放防火墙端口以允许局域网访问
+        logger.info("开放防火墙端口以允许局域网访问...")
+        # 开放 HTTP 端口 80
+        if not self.open_port(80, "tcp"):
+            logger.warning("开放防火墙端口 80 失败，请手动检查防火墙配置")
+        else:
+            logger.info("防火墙端口 80 已开放")
+
+        # 开放 HTTPS 端口 443
+        if not self.open_port(443, "tcp"):
+            logger.warning("开放防火墙端口 443 失败，请手动检查防火墙配置")
+        else:
+            logger.info("防火墙端口 443 已开放")
+
+        # 验证安装是否成功
+        logger.info("验证 Nginx 安装...")
+        verify_cmd = "nginx -v 2>&1"
+        success, output = self.ssh_tool.run_cmd(verify_cmd)
+        if success and output.strip():
+            logger.info(f"Nginx 版本信息: {output.strip()}")
+
+        # 检查服务状态
+        status = self.service_status("nginx")
+        if status == "active":
+            logger.info("Nginx 服务运行正常")
+        else:
+            logger.warning(f"Nginx 服务状态: {status}")
+
+        # 显示安装成功信息
+        logger.info("=" * 70)
+        logger.info("🎉 Nginx 安装成功！")
+        logger.info("=" * 70)
+        logger.info("📌 服务信息：")
+        logger.info(f"   主机: {self.ssh_tool.ip}")
+        logger.info("   默认端口: 80")
+        logger.info("   配置文件: /etc/nginx/nginx.conf")
+        logger.info("   网站目录: /usr/share/nginx/html")
+        logger.info("")
+        logger.info("💡 常用命令：")
+        logger.info("   启动服务: systemctl start nginx")
+        logger.info("   停止服务: systemctl stop nginx")
+        logger.info("   重启服务: systemctl restart nginx")
+        logger.info("   重载配置: systemctl reload nginx")
+        logger.info("   查看状态: systemctl status nginx")
+        logger.info("")
+        logger.info("=" * 70)
+
+        return True
+
+    def uninstall_nginx(
+        self,
+        remove_config: bool = True,
+        remove_logs: bool = True,
+        remove_html: bool = False,
+    ) -> bool:
+        """卸载 Nginx Web 服务器
+
+        Args:
+            remove_config: 是否删除配置文件（/etc/nginx），默认 True
+            remove_logs: 是否删除日志文件（/var/log/nginx），默认 True
+            remove_html: 是否删除网站目录（/usr/share/nginx/html），默认 False
+                        警告：删除网站目录将永久丢失所有网站文件！
+
+        Returns:
+            bool: 成功返回 True，失败返回 False
+        """
+        logger.info("开始卸载 Nginx...")
+
+        # 检查 Nginx 是否已安装
+        is_installed, _ = self._check_package_installed("nginx")
+        if not is_installed:
+            logger.info("Nginx 未安装，无需卸载")
+            return True
+
+        # 步骤 1：停止 Nginx 服务
+        logger.info("停止 Nginx 服务...")
+        if not self.service_stop("nginx"):
+            logger.warning("停止 Nginx 服务失败，继续卸载流程")
+
+        # 等待服务完全停止
+        time.sleep(2)
+
+        # 禁用服务开机自启
+        logger.info("禁用 Nginx 服务开机自启...")
+        if not self.service_disable("nginx"):
+            logger.warning("禁用 Nginx 服务开机自启失败，继续卸载流程")
+
+        # 步骤 2：关闭防火墙端口（如果之前开放过）
+        # logger.info("关闭防火墙端口 80 和 443...")
+        # self.close_port(80, "tcp")
+        # self.close_port(443, "tcp")
+
+        # 步骤 3：卸载 Nginx 软件包
+        logger.info("卸载 Nginx 软件包...")
+        if not self.uninstall_soft("nginx"):
+            logger.error("Nginx 软件包卸载失败")
+            return False
+
+        # 步骤 4：清理配置文件
+        if remove_config:
+            logger.info("清理 Nginx 配置文件...")
+            config_files = ["/etc/nginx"]
+            for config_file in config_files:
+                remove_cmd = f"rm -rf {config_file} 2>&1 || true"
+                self.ssh_tool.run_cmd(remove_cmd)
+            logger.info("配置文件清理完成")
+        else:
+            logger.info("保留配置文件（根据 remove_config 参数）")
+
+        # 步骤 5：清理日志文件
+        if remove_logs:
+            logger.info("清理 Nginx 日志文件...")
+            log_files = [
+                "/var/log/nginx",
+            ]
+            for log_file in log_files:
+                remove_cmd = f"rm -rf {log_file} 2>&1 || true"
+                self.ssh_tool.run_cmd(remove_cmd)
+            logger.info("日志文件清理完成")
+        else:
+            logger.info("保留日志文件（根据 remove_logs 参数）")
+
+        # 步骤 6：清理网站目录（可选，危险操作）
+        if remove_html:
+            logger.warning("⚠️  警告：将删除 Nginx 网站目录，所有网站文件将永久丢失！")
+            html_dir = "/usr/share/nginx/html"
+            check_html_cmd = f"test -d {html_dir} && echo 'exists' || echo 'not_exists'"
+            success, html_output = self.ssh_tool.run_cmd(check_html_cmd)
+
+            if html_output.strip() == "exists":
+                logger.info(f"删除网站目录: {html_dir}")
+                remove_html_cmd = f"rm -rf {html_dir} 2>&1"
+                success, output = self.ssh_tool.run_cmd(remove_html_cmd)
+                if success:
+                    logger.info("网站目录已删除")
+                else:
+                    logger.warning(f"删除网站目录失败: {output}")
+            else:
+                logger.info("网站目录不存在，跳过删除")
+        else:
+            logger.info("保留网站目录（根据 remove_html 参数）")
+
+        # 步骤 7：清理临时文件和缓存
+        logger.info("清理 Nginx 临时文件和缓存...")
+        temp_files = [
+            "/var/cache/nginx",
+            "/var/lib/nginx",
+            "/var/run/nginx",
+            "/tmp/nginx*",
+        ]
+        for temp_pattern in temp_files:
+            remove_cmd = f"rm -rf {temp_pattern} 2>&1 || true"
+            self.ssh_tool.run_cmd(remove_cmd)
+        logger.info("临时文件清理完成")
+
+        # 显示卸载成功信息
+        logger.info("=" * 70)
+        logger.info("✅ Nginx 卸载完成！")
+        logger.info("=" * 70)
+
+        return True
+
+    def uninstall_mysql8(
+        self,
+        remove_data: bool = True,
+        remove_config: bool = True,
+        remove_repo: bool = False,
+        remove_cache: bool = False,
+    ) -> bool:
         """卸载 MySQL 8 社区版
 
         Args:
@@ -622,9 +996,8 @@ class LinuxEnv:
         logger.info("开始卸载 MySQL 8...")
 
         # 检查 MySQL 是否已安装
-        check_cmd = "rpm -q mysql-community-server 2>&1"
-        success, output = self.ssh_tool.run_cmd(check_cmd)
-        if not success or "not installed" in output.lower():
+        is_installed, _ = self._check_package_installed("mysql-community-server")
+        if not is_installed:
             logger.info("MySQL 8 未安装，无需卸载")
             return True
 
@@ -632,10 +1005,10 @@ class LinuxEnv:
         logger.info("停止 MySQL 服务...")
         stop_cmd = "systemctl stop mysqld 2>&1 || true"
         self.ssh_tool.run_cmd(stop_cmd)
-        
+
         # 等待服务完全停止
         time.sleep(2)
-        
+
         # 禁用服务开机自启
         logger.info("禁用 MySQL 服务开机自启...")
         disable_cmd = "systemctl disable mysqld 2>&1 || true"
@@ -652,7 +1025,9 @@ class LinuxEnv:
             self.ssh_tool.run_cmd(clean_cmd, timeout=60)
             logger.info("yum 缓存已清理")
         else:
-            logger.info("不卸载 yum 安装的 MySQL 包，也保留 yum 缓存，将仅清理数据、配置、日志等文件")
+            logger.info(
+                "不卸载 yum 安装的 MySQL 包，也保留 yum 缓存，将仅清理数据、配置、日志等文件"
+            )
 
         # 步骤 4：清理配置文件
         if remove_config:
@@ -675,7 +1050,7 @@ class LinuxEnv:
             data_dir = "/var/lib/mysql"
             check_data_cmd = f"test -d {data_dir} && echo 'exists' || echo 'not_exists'"
             success, data_output = self.ssh_tool.run_cmd(check_data_cmd)
-            
+
             if data_output.strip() == "exists":
                 logger.info(f"删除数据目录: {data_dir}")
                 remove_data_cmd = f"rm -rf {data_dir} 2>&1"
@@ -691,10 +1066,7 @@ class LinuxEnv:
 
         # 步骤 6：清理日志文件
         logger.info("清理 MySQL 日志文件...")
-        log_files = [
-            "/var/log/mysqld.log",
-            "/var/log/mysql"
-        ]
+        log_files = ["/var/log/mysqld.log", "/var/log/mysql"]
         for log_file in log_files:
             remove_cmd = f"rm -rf {log_file} 2>&1 || true"
             self.ssh_tool.run_cmd(remove_cmd)
@@ -723,7 +1095,7 @@ class LinuxEnv:
             for repo_pattern in repo_files:
                 remove_cmd = f"rm -f {repo_pattern} 2>&1 || true"
                 self.ssh_tool.run_cmd(remove_cmd)
-            
+
             # 卸载 mysql80-community-release 包
             uninstall_repo_cmd = "rpm -e mysql80-community-release 2>&1 || true"
             self.ssh_tool.run_cmd(uninstall_repo_cmd)
@@ -735,24 +1107,28 @@ class LinuxEnv:
         logger.info("检查并清理 SELinux 上下文...")
         selinux_check_cmd = "getenforce 2>/dev/null || echo 'Disabled'"
         success, selinux_status = self.ssh_tool.run_cmd(selinux_check_cmd)
-        
+
         if selinux_status.strip() in ["Enforcing", "Permissive"]:
-            logger.info(f"SELinux 状态: {selinux_status.strip()}，正在清理 MySQL 相关的 SELinux 上下文...")
-            
+            logger.info(
+                f"SELinux 状态: {selinux_status.strip()}，正在清理 MySQL 相关的 SELinux 上下文..."
+            )
+
             # 检查 semanage 命令是否可用
             semanage_check = "which semanage >/dev/null 2>&1 && echo 'available' || echo 'not_available'"
             success, semanage_status = self.ssh_tool.run_cmd(semanage_check)
-            
+
             if semanage_status.strip() == "available":
                 # 删除之前添加的 SELinux 上下文规则
                 logger.info("删除 SELinux 上下文规则...")
                 # 列出所有与 /var/lib/mysql 相关的上下文规则
                 list_cmd = "semanage fcontext -l | grep '/var/lib/mysql' 2>&1 || true"
                 success, list_output = self.ssh_tool.run_cmd(list_cmd)
-                
+
                 if list_output.strip() and "mysqld_db_t" in list_output:
                     # 删除规则
-                    delete_cmd = "semanage fcontext -d '/var/lib/mysql(/.*)?' 2>&1 || true"
+                    delete_cmd = (
+                        "semanage fcontext -d '/var/lib/mysql(/.*)?' 2>&1 || true"
+                    )
                     self.ssh_tool.run_cmd(delete_cmd)
                     logger.info("SELinux 上下文规则已删除")
                 else:
@@ -765,10 +1141,12 @@ class LinuxEnv:
         # 步骤 9：清理系统用户和组（如果存在）
         logger.info("清理 MySQL 系统用户和组...")
         # 先检查用户是否存在
-        check_user_cmd = "id mysql >/dev/null 2>&1 && echo 'exists' || echo 'not_exists'"
+        check_user_cmd = (
+            "id mysql >/dev/null 2>&1 && echo 'exists' || echo 'not_exists'"
+        )
         success, user_output = self.ssh_tool.run_cmd(check_user_cmd)
         user_deleted = False
-        
+
         if user_output.strip() == "exists":
             logger.info("检测到 mysql 用户，正在删除...")
             user_cmds = [
@@ -795,36 +1173,36 @@ class LinuxEnv:
         logger.info("   ✓ 防火墙端口 3306 已关闭")
         logger.info("   ✓ 日志文件已清理")
         logger.info("   ✓ 临时文件和 Socket 文件已清理")
-        
+
         if remove_data:
             logger.info("   ✓ 数据目录已删除（所有数据已丢失）")
         else:
             logger.info("   ⚠ 数据目录已保留: /var/lib/mysql")
-        
+
         if remove_config:
             logger.info("   ✓ 配置文件已删除")
         else:
             logger.info("   ⚠ 配置文件已保留")
-        
+
         if remove_repo:
             logger.info("   ✓ MySQL 仓库配置已删除")
         else:
             logger.info("   ⚠ MySQL 仓库配置已保留")
-        
+
         if remove_cache:
             logger.info("   ✓ yum 缓存已清理")
         else:
             logger.info("   ✓ yum 缓存已保留（重新安装时可直接使用，无需重新下载）")
-        
+
         # 显示 SELinux 和用户清理状态
         if selinux_status.strip() in ["Enforcing", "Permissive"]:
             logger.info("   ✓ SELinux 上下文已清理")
-        
+
         if user_deleted:
             logger.info("   ✓ MySQL 用户和组已删除")
         else:
             logger.info("   ℹ️ MySQL 用户不存在（无需删除）")
-        
+
         logger.info("   ✓ systemd daemon 已重新加载")
         logger.info("")
         logger.info("💡 提示：")
@@ -882,7 +1260,9 @@ class LinuxEnv:
             logger.error(f"Reboot system error: {output}")
             return False
 
-    def check_reboot_ok(self, max_wait_time: int = 300, retry_interval: int = 5) -> bool:
+    def check_reboot_ok(
+        self, max_wait_time: int = 300, retry_interval: int = 5
+    ) -> bool:
         """检查重启是否完成
 
         Args:
@@ -908,7 +1288,9 @@ class LinuxEnv:
 
             # 尝试重新连接
             if self.ssh_tool.connect(timeout=5):
-                logger.info(f"服务器重启完成，SSH连接成功 (耗时: {int(time.time() - start_time)} 秒)")
+                logger.info(
+                    f"服务器重启完成，SSH连接成功 (耗时: {int(time.time() - start_time)} 秒)"
+                )
                 return True
 
             # 等待后重试
@@ -919,7 +1301,9 @@ class LinuxEnv:
         logger.error(f"等待服务器重启超时 (超过 {max_wait_time} 秒)")
         return False
 
-    def kill_process_by_name(self, process_name: str, force: bool = False, case_sensitive: bool = True) -> bool:
+    def kill_process_by_name(
+        self, process_name: str, force: bool = False, case_sensitive: bool = True
+    ) -> bool:
         """根据进程名杀死进程
 
         Args:
@@ -996,7 +1380,9 @@ class LinuxEnv:
                 logger.error(f"杀死进程失败: PID {process_id}, 错误: {output}")
                 return False
 
-    def kill_process_by_pids(self, process_ids: list[int], force: bool = False) -> dict[int, bool]:
+    def kill_process_by_pids(
+        self, process_ids: list[int], force: bool = False
+    ) -> dict[int, bool]:
         """根据进程ID列表批量杀死进程
 
         Args:
@@ -1057,7 +1443,9 @@ class LinuxEnv:
 
                 # 统计结果
                 success_count = sum(1 for v in results.values() if v)
-                logger.info(f"批量杀死进程完成: 成功 {success_count}/{len(process_ids)}")
+                logger.info(
+                    f"批量杀死进程完成: 成功 {success_count}/{len(process_ids)}"
+                )
             else:
                 # 其他错误，标记所有为失败
                 logger.error(f"杀死进程失败: PIDs {process_ids}, 错误: {output}")
@@ -1065,7 +1453,9 @@ class LinuxEnv:
 
             return results
 
-    def get_pids_by_name(self, process_name: str, case_sensitive: bool = True) -> list[int]:
+    def get_pids_by_name(
+        self, process_name: str, case_sensitive: bool = True
+    ) -> list[int]:
         """根据进程名获取进程ID列表
 
         Args:
@@ -1160,7 +1550,9 @@ class LinuxEnv:
                     if ":" in local_addr_port:
                         local_address, port_str = local_addr_port.rsplit(":", 1)
                         # 处理 IPv6 地址（可能包含多个冒号）
-                        if local_addr_port.count(":") > 1 and not local_addr_port.startswith("::"):
+                        if local_addr_port.count(
+                            ":"
+                        ) > 1 and not local_addr_port.startswith("::"):
                             # IPv6 地址，找到最后一个冒号
                             last_colon = local_addr_port.rfind(":")
                             local_address = local_addr_port[:last_colon]
@@ -1176,10 +1568,14 @@ class LinuxEnv:
 
                             port_info = {
                                 "port": port,
-                                "protocol": protocol.replace("6", ""),  # tcp6 -> tcp, udp6 -> udp
+                                "protocol": protocol.replace(
+                                    "6", ""
+                                ),  # tcp6 -> tcp, udp6 -> udp
                                 "state": state,
                                 "local_address": local_address,
-                                "foreign_address": foreign_address if foreign_address else "",
+                                "foreign_address": (
+                                    foreign_address if foreign_address else ""
+                                ),
                             }
                             ports_info.append(port_info)
                         except ValueError:
@@ -1219,7 +1615,9 @@ class LinuxEnv:
                             local_address, port_str = local_addr_port.rsplit(":", 1)
 
                             # 处理 IPv6
-                            if local_addr_port.count(":") > 1 and not local_addr_port.startswith("::"):
+                            if local_addr_port.count(
+                                ":"
+                            ) > 1 and not local_addr_port.startswith("::"):
                                 last_colon = local_addr_port.rfind(":")
                                 local_address = local_addr_port[:last_colon]
                                 port_str = local_addr_port[last_colon + 1 :]
@@ -1232,16 +1630,22 @@ class LinuxEnv:
                                 if len(parts) > 4:
                                     if protocol.startswith("tcp"):
                                         state = parts[5] if len(parts) > 5 else ""
-                                        foreign_address = parts[4] if len(parts) > 4 else ""
+                                        foreign_address = (
+                                            parts[4] if len(parts) > 4 else ""
+                                        )
                                     else:
-                                        foreign_address = parts[4] if len(parts) > 4 else ""
+                                        foreign_address = (
+                                            parts[4] if len(parts) > 4 else ""
+                                        )
 
                                 port_info = {
                                     "port": port,
                                     "protocol": protocol.replace("6", ""),
                                     "state": state,
                                     "local_address": local_address,
-                                    "foreign_address": foreign_address if foreign_address else "",
+                                    "foreign_address": (
+                                        foreign_address if foreign_address else ""
+                                    ),
                                 }
                                 ports_info.append(port_info)
                             except ValueError:
@@ -1495,7 +1899,9 @@ class LinuxEnv:
                 return "firewalld_active"
             elif status == "inactive":
                 # 检查 firewalld 是否已安装
-                check_installed, _ = self.ssh_tool.run_cmd("systemctl list-unit-files | grep -q firewalld.service 2>&1")
+                check_installed, _ = self.ssh_tool.run_cmd(
+                    "systemctl list-unit-files | grep -q firewalld.service 2>&1"
+                )
                 if check_installed:
                     logger.debug("防火墙状态: firewalld 已安装但未运行")
                     return "firewalld_inactive"
@@ -1607,7 +2013,9 @@ class LinuxEnv:
 
         return True
 
-    def backup_yum_repos(self, add_date: bool = True, backup_dir: str | None = None) -> bool:
+    def backup_yum_repos(
+        self, add_date: bool = True, backup_dir: str | None = None
+    ) -> bool:
         """备份 yum.repos.d 目录下的源文件
 
         Args:
@@ -1683,13 +2091,21 @@ class LinuxEnv:
         if success_count > 0 and failed_count == 0:
             logger.info(
                 f"备份完成：成功 {success_count} 个文件"
-                + (f"，跳过 {skipped_count} 个不存在的文件" if skipped_count > 0 else "")
+                + (
+                    f"，跳过 {skipped_count} 个不存在的文件"
+                    if skipped_count > 0
+                    else ""
+                )
             )
             return True
         elif success_count > 0:
             logger.warning(
                 f"部分备份完成：成功 {success_count} 个，失败 {failed_count} 个"
-                + (f"，跳过 {skipped_count} 个不存在的文件" if skipped_count > 0 else "")
+                + (
+                    f"，跳过 {skipped_count} 个不存在的文件"
+                    if skipped_count > 0
+                    else ""
+                )
             )
             return True
         elif skipped_count == len(repo_files):
@@ -1698,7 +2114,11 @@ class LinuxEnv:
         else:
             logger.error(
                 f"备份失败：失败 {failed_count} 个文件"
-                + (f"，跳过 {skipped_count} 个不存在的文件" if skipped_count > 0 else "")
+                + (
+                    f"，跳过 {skipped_count} 个不存在的文件"
+                    if skipped_count > 0
+                    else ""
+                )
             )
             return False
 
@@ -1715,7 +2135,9 @@ class LinuxEnv:
         # 如果未指定本地目录，使用默认的 centos9-aliyun 目录
         if local_dir is None:
             current_file_dir = os.path.dirname(os.path.abspath(__file__))
-            local_dir = os.path.join(current_file_dir, "..", "static", "repo", "centos9-aliyun")
+            local_dir = os.path.join(
+                current_file_dir, "..", "static", "repo", "centos9-aliyun"
+            )
             local_dir = os.path.normpath(local_dir)
             logger.info(f"使用默认阿里云源配置: {local_dir}")
 
@@ -1743,7 +2165,9 @@ class LinuxEnv:
 
             # 上传文件到远程
             logger.info(f"上传 {repo_file} 到远程服务器...")
-            success = self.ssh_tool.upload_file(local_path, remote_path, create_dirs=True)
+            success = self.ssh_tool.upload_file(
+                local_path, remote_path, create_dirs=True
+            )
             if not success:
                 logger.error(f"上传 {repo_file} 失败")
                 failed_count += 1
@@ -1766,7 +2190,9 @@ class LinuxEnv:
             return False
 
         # 如果有文件成功替换，执行清理和重建缓存
-        logger.info(f"源文件替换完成（成功 {success_count} 个，失败 {failed_count} 个）")
+        logger.info(
+            f"源文件替换完成（成功 {success_count} 个，失败 {failed_count} 个）"
+        )
 
         # 清理 yum 缓存
         logger.info("清理 yum 缓存...")
@@ -1782,7 +2208,9 @@ class LinuxEnv:
         logger.info("重建 yum 缓存...")
         makecache_cmd = "yum makecache"
         makecache_cmd_stream = self._wrap_cmd_with_pty(makecache_cmd)
-        success, output = self.ssh_tool.run_cmd(makecache_cmd_stream, realtime_output=True)
+        success, output = self.ssh_tool.run_cmd(
+            makecache_cmd_stream, realtime_output=True
+        )
         if not success:
             logger.error(f"重建 yum 缓存失败: {output}")
             return False
@@ -1792,7 +2220,9 @@ class LinuxEnv:
         logger.info("验证仓库是否生效...")
         repolist_cmd = "yum repolist"
         repolist_cmd_stream = self._wrap_cmd_with_pty(repolist_cmd)
-        success, output = self.ssh_tool.run_cmd(repolist_cmd_stream, realtime_output=True)
+        success, output = self.ssh_tool.run_cmd(
+            repolist_cmd_stream, realtime_output=True
+        )
         if success:
             # 检查输出中是否包含仓库信息
             if "repo id" in output.lower() or "repolist" in output.lower():
@@ -1822,13 +2252,17 @@ class LinuxEnv:
         # 获取包根目录路径
         current_file_dir = os.path.dirname(os.path.abspath(__file__))
         # 从 sk_lib/os_env/linux.py 到 sk_lib/static/repo/centos9-default
-        repo_dir = os.path.join(current_file_dir, "..", "static", "repo", "centos9-default")
+        repo_dir = os.path.join(
+            current_file_dir, "..", "static", "repo", "centos9-default"
+        )
         repo_dir = os.path.normpath(repo_dir)
 
         logger.info(f"使用默认源文件配置恢复: {repo_dir}")
         return self.replace_yum_repos(repo_dir)
 
-    def yum_update(self, package_name: str | None = None, clean_cache: bool = True) -> bool:
+    def yum_update(
+        self, package_name: str | None = None, clean_cache: bool = True
+    ) -> bool:
         """更新系统包
 
         Args:
@@ -1864,7 +2298,9 @@ class LinuxEnv:
 
         # 执行更新命令（使用 stdbuf 强制行缓冲，实现实时输出）
         update_cmd_stream = self._wrap_cmd_with_pty(update_cmd)
-        success, output = self.ssh_tool.run_cmd(update_cmd_stream, realtime_output=True, timeout=1800)
+        success, output = self.ssh_tool.run_cmd(
+            update_cmd_stream, realtime_output=True, timeout=1800
+        )
 
         if success:
             if package_name:
@@ -1879,28 +2315,130 @@ class LinuxEnv:
                 logger.error(f"系统包更新失败: {output}")
             return False
 
+    def _check_package_installed(self, package_name: str) -> tuple[bool, str]:
+        """检查软件包是否已安装
+        使用 rpm -q 和 yum list installed 两种方式检查，以处理包名别名的情况
+        （例如：vim 是 vim-enhanced 的别名）
+
+        Args:
+            package_name: 软件包名称
+
+        Returns:
+            tuple[bool, str]: (是否已安装, 检查输出)
+        """
+        # 方法1：使用 rpm -q 检查（精确匹配）
+        check_cmd = f"rpm -q {package_name} 2>&1"
+        success, output = self.ssh_tool.run_cmd(check_cmd)
+        output_lower = output.lower().strip()
+        # 如果 rpm -q 显示已安装，直接返回
+        if success and output.strip() and "not installed" not in output_lower:
+            return True, output.strip()
+
+        # 方法2：使用 yum list installed 检查（可以处理别名）
+        # 例如：vim 是 vim-enhanced 的别名
+        yum_check_cmd = f"yum list installed {package_name} 2>&1"
+        yum_success, yum_output = self.ssh_tool.run_cmd(yum_check_cmd)
+        yum_output_lower = yum_output.lower()
+
+        # 检查 yum 输出中是否包含已安装的包信息
+        if yum_success and yum_output.strip():
+            # 检查是否包含错误信息
+            error_keywords = [
+                "not installed",
+                "no matching packages",
+                "error:",
+                "no packages found",
+            ]
+            has_error = any(keyword in yum_output_lower for keyword in error_keywords)
+
+            # 检查是否包含 "Available Packages"（表示包未安装，但在仓库中可用）
+            has_available = "available packages" in yum_output_lower
+
+            if not has_error and not has_available:
+                # 检查是否包含已安装的包信息
+                # yum list installed 的输出格式通常是：
+                # Installed Packages
+                # 包名.架构    版本    仓库
+                lines = yum_output.strip().split("\n")
+                found_package = False
+                for line in lines:
+                    line_lower = line.lower()
+                    # 跳过标题行、分隔线和空行
+                    if (
+                        "installed packages" in line_lower
+                        or line.strip() == ""
+                        or line.strip().startswith("=")
+                        or line.strip().startswith("-")
+                    ):
+                        continue
+                    # 检查是否包含包名（可能是别名，如 vim -> vim-enhanced）
+                    if package_name.lower() in line_lower:
+                        # 检查是否是已安装的包行（通常包含版本号和架构）
+                        # 格式通常是：包名.架构    版本号    仓库名
+                        parts = line.split()
+                        if len(parts) >= 2:  # 至少有包名和版本号
+                            # 检查是否包含版本号格式（通常包含 : 或 -）
+                            if any(char in parts[1] for char in [":", "-"]):
+                                found_package = True
+                                return True, line.strip()
+
+                # 如果找到了包信息行，但上面的循环没匹配到，检查是否有实际数据行
+                # （排除标题行后，如果有数据行，说明包已安装）
+                data_lines = [
+                    line
+                    for line in lines
+                    if line.strip()
+                    and not line.strip().startswith("=")
+                    and not line.strip().startswith("-")
+                    and "installed packages" not in line.lower()
+                ]
+                if len(data_lines) > 0:
+                    # 检查数据行中是否包含包名
+                    for line in data_lines:
+                        if package_name.lower() in line.lower():
+                            return True, line.strip()
+
+        return False, output.strip()
+
     def _yum_install(self, soft_name: str) -> bool:
         """yum安装"""
-        # 检查是否已经安装（使用 rpm -q）
-        success, output = self.ssh_tool.run_cmd(f"rpm -q {soft_name} 2>&1")
-        if success and output.strip():
+        # 检查是否已经安装
+        is_installed, output = self._check_package_installed(soft_name)
+        time.sleep(1)
+        if is_installed:
             return True
 
         install_cmd = f"yum install -y {soft_name}"
 
         # 执行安装命令（使用 stdbuf 强制行缓冲，改善长时间下载时的输出刷新）
         install_cmd_stream = self._wrap_cmd_with_pty(install_cmd)
-        success, output = self.ssh_tool.run_cmd(install_cmd_stream, realtime_output=True)
+        success, output = self.ssh_tool.run_cmd(
+            install_cmd_stream, realtime_output=True
+        )
         if not success:
             return False
 
-        # 验证安装是否成功（使用 rpm -q）
-        success, output = self.ssh_tool.run_cmd(f"rpm -q {soft_name} 2>&1", realtime_output=True)
-        if success and output.strip():
+        # 验证安装是否成功
+        # 先检查 yum 输出中是否显示 "already installed" 或 "Nothing to do"
+        # 这表示包已经安装（可能是别名情况）
+        install_output_lower = output.lower()
+        if (
+            "already installed" in install_output_lower
+            or "nothing to do" in install_output_lower
+        ):
+            logger.info(f"Soft {soft_name} is already installed (or alias)")
+            return True
+
+        # 使用检查方法验证
+        is_installed, check_output = self._check_package_installed(soft_name)
+        time.sleep(1)
+        if is_installed:
             logger.info(f"Soft {soft_name} install success")
             return True
         else:
             logger.error(f"Soft {soft_name} install error")
+            if check_output:
+                logger.error(f"验证输出: {check_output}")
             return False
 
     def _yum_uninstall(self, soft_name: str) -> bool:
@@ -1914,7 +2452,9 @@ class LinuxEnv:
 
         return flag
 
-    def download_python(self, version: str, download_dir: str, replace: bool = False) -> bool:
+    def download_python(
+        self, version: str, download_dir: str, replace: bool = False
+    ) -> bool:
         """下载指定版本的 Python 源码包
 
         Args:
@@ -1965,7 +2505,9 @@ class LinuxEnv:
         logger.info(f"保存到: {download_path}")
 
         # 在本地临时目录下载文件
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f"-{filename}") as tmp_file:
+        with tempfile.NamedTemporaryFile(
+            delete=False, suffix=f"-{filename}"
+        ) as tmp_file:
             local_temp_path = tmp_file.name
 
         try:
@@ -1985,20 +2527,29 @@ class LinuxEnv:
                         f.write(chunk)
                         downloaded_size += len(chunk)
                         # 每下载 1MB 显示一次进度
-                        if downloaded_size % (1024 * 1024) == 0 or downloaded_size == total_size:
+                        if (
+                            downloaded_size % (1024 * 1024) == 0
+                            or downloaded_size == total_size
+                        ):
                             if total_size > 0:
                                 percent = (downloaded_size / total_size) * 100
                                 logger.debug(
                                     f"下载进度: {percent:.1f}% ({downloaded_size / 1024 / 1024:.1f}MB / {total_size / 1024 / 1024:.1f}MB)"
                                 )
                             else:
-                                logger.debug(f"已下载: {downloaded_size / 1024 / 1024:.1f}MB")
+                                logger.debug(
+                                    f"已下载: {downloaded_size / 1024 / 1024:.1f}MB"
+                                )
 
-            logger.info(f"本地下载完成，文件大小: {downloaded_size / 1024 / 1024:.1f}MB")
+            logger.info(
+                f"本地下载完成，文件大小: {downloaded_size / 1024 / 1024:.1f}MB"
+            )
 
             # 通过 SFTP 上传到远程服务器
             logger.info(f"正在上传文件到远程服务器: {download_path}")
-            success = self.ssh_tool.upload_file(local_temp_path, download_path, create_dirs=True)
+            success = self.ssh_tool.upload_file(
+                local_temp_path, download_path, create_dirs=True
+            )
 
             if not success:
                 logger.error(f"上传文件到远程服务器失败: {download_path}")
@@ -2006,14 +2557,18 @@ class LinuxEnv:
 
             # 验证远程文件是否存在
             logger.info(f"验证远程文件是否存在: {download_path}")
-            verify_cmd = f"test -f {download_path} && echo 'exists' || echo 'not_exists'"
+            verify_cmd = (
+                f"test -f {download_path} && echo 'exists' || echo 'not_exists'"
+            )
             success, output = self.ssh_tool.run_cmd(verify_cmd)
             if success and output.strip() == "exists":
                 # 获取文件大小
                 size_cmd = f"ls -lh {download_path} | awk '{{print $5}}'"
                 success, size_output = self.ssh_tool.run_cmd(size_cmd)
                 file_size = size_output.strip() if success else "未知"
-                logger.info(f"Python {version} 下载并上传成功: {download_path} (大小: {file_size})")
+                logger.info(
+                    f"Python {version} 下载并上传成功: {download_path} (大小: {file_size})"
+                )
                 return True
             else:
                 logger.error(f"远程文件验证失败: {download_path}")
@@ -2073,7 +2628,9 @@ class LinuxEnv:
         if success and output.strip().isdigit():
             available_mb = int(output.strip())
             if available_mb < 100:
-                logger.error(f"磁盘空间不足！可用空间: {available_mb}MB，建议至少 100MB")
+                logger.error(
+                    f"磁盘空间不足！可用空间: {available_mb}MB，建议至少 100MB"
+                )
                 return False
             logger.info(f"磁盘可用空间: {available_mb}MB")
 
@@ -2083,7 +2640,9 @@ class LinuxEnv:
         self.ssh_tool.run_cmd(remove_cmd)
 
         # 再次确认目录已完全删除
-        success, output = self.ssh_tool.run_cmd("test -d ~/.pyenv && echo 'exists' || echo 'not_exists'")
+        success, output = self.ssh_tool.run_cmd(
+            "test -d ~/.pyenv && echo 'exists' || echo 'not_exists'"
+        )
         if "exists" == output.strip():
             logger.error("无法删除旧的 ~/.pyenv 目录，可能存在权限问题")
             return False
@@ -2095,7 +2654,9 @@ class LinuxEnv:
         # 如果指定了版本，需要完整克隆后再切换；否则使用浅克隆获取最新版本
         if version:
             # 完整克隆（不使用 --depth 1）以便切换到指定版本
-            clone_cmd = "git clone --progress https://gitee.com/mirrors/pyenv.git ~/.pyenv 2>&1"
+            clone_cmd = (
+                "git clone --progress https://gitee.com/mirrors/pyenv.git ~/.pyenv 2>&1"
+            )
         else:
             # 使用浅克隆（--depth 1）减少数据传输，提高成功率
             clone_cmd = "git clone --progress --depth 1 https://gitee.com/mirrors/pyenv.git ~/.pyenv 2>&1"
@@ -2125,7 +2686,9 @@ class LinuxEnv:
         logger.info("配置 shell 环境变量...")
 
         # 检查 ~/.bashrc 是否已经包含 pyenv 配置
-        success, output = self.ssh_tool.run_cmd("grep -q 'PYENV_ROOT' ~/.bashrc && echo 'exists' || echo 'not_exists'")
+        success, output = self.ssh_tool.run_cmd(
+            "grep -q 'PYENV_ROOT' ~/.bashrc && echo 'exists' || echo 'not_exists'"
+        )
         if "exists" == output.strip():
             logger.info("~/.bashrc 中已存在 pyenv 配置，先删除旧配置...")
             # 删除所有包含 pyenv 或 PYENV_ROOT 的行
@@ -2211,9 +2774,7 @@ class LinuxEnv:
             logger.info("开始安装 nvm (最新版本)...")
 
         # 检查是否已经安装 nvm
-        check_cmd = (
-            'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \\. "$NVM_DIR/nvm.sh" && nvm --version 2>&1'
-        )
+        check_cmd = 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \\. "$NVM_DIR/nvm.sh" && nvm --version 2>&1'
         success, output = self.ssh_tool.run_cmd(check_cmd)
         if success and output.strip() and "command not found" not in output.lower():
             logger.info(f"nvm 已经安装（版本: {output.strip()}），跳过安装步骤")
@@ -2244,7 +2805,9 @@ class LinuxEnv:
         self.ssh_tool.run_cmd(remove_cmd)
 
         # 再次确认目录已完全删除
-        success, output = self.ssh_tool.run_cmd("test -d ~/.nvm && echo 'exists' || echo 'not_exists'")
+        success, output = self.ssh_tool.run_cmd(
+            "test -d ~/.nvm && echo 'exists' || echo 'not_exists'"
+        )
         if "exists" == output.strip():
             logger.error("无法删除旧的 ~/.nvm 目录，可能存在权限问题")
             return False
@@ -2256,7 +2819,9 @@ class LinuxEnv:
         # 如果指定了版本，需要完整克隆后再切换；否则使用浅克隆获取最新版本
         if version:
             # 完整克隆（不使用 --depth 1）以便切换到指定版本
-            clone_cmd = "git clone --progress https://gitee.com/mirrors/nvm-sh.git ~/.nvm 2>&1"
+            clone_cmd = (
+                "git clone --progress https://gitee.com/mirrors/nvm-sh.git ~/.nvm 2>&1"
+            )
         else:
             # 使用浅克隆（--depth 1）减少数据传输，提高成功率
             clone_cmd = "git clone --progress --depth 1 https://gitee.com/mirrors/nvm-sh.git ~/.nvm 2>&1"
@@ -2284,7 +2849,9 @@ class LinuxEnv:
         logger.info("配置 shell 环境变量...")
 
         # 检查 ~/.bashrc 是否已经包含 nvm 配置
-        success, output = self.ssh_tool.run_cmd("grep -q 'NVM_DIR' ~/.bashrc && echo 'exists' || echo 'not_exists'")
+        success, output = self.ssh_tool.run_cmd(
+            "grep -q 'NVM_DIR' ~/.bashrc && echo 'exists' || echo 'not_exists'"
+        )
         if "exists" == output.strip():
             logger.info("~/.bashrc 中已存在 nvm 配置，先删除旧配置...")
             # 删除所有包含 nvm 或 NVM_DIR 的行
@@ -2370,7 +2937,9 @@ class LinuxEnv:
         # 检查是否已经安装 pyenv
         success, output = self.ssh_tool.run_cmd("which pyenv 2>&1")
         if not success or not output.strip():
-            success, output = self.ssh_tool.run_cmd("test -d ~/.pyenv && echo 'exists' || echo 'not_exists'")
+            success, output = self.ssh_tool.run_cmd(
+                "test -d ~/.pyenv && echo 'exists' || echo 'not_exists'"
+            )
             if "not_exists" == output.strip():
                 logger.info("pyenv 未安装，无需卸载")
                 return True
@@ -2396,7 +2965,9 @@ class LinuxEnv:
 
         # 验证卸载是否成功
         logger.info("验证 pyenv 卸载...")
-        success, output = self.ssh_tool.run_cmd("test -d ~/.pyenv && echo 'exists' || echo 'not_exists'")
+        success, output = self.ssh_tool.run_cmd(
+            "test -d ~/.pyenv && echo 'exists' || echo 'not_exists'"
+        )
         if "not_exists" == output.strip():
             logger.info("✓ pyenv 卸载成功！")
             logger.info("=" * 70)
@@ -2424,7 +2995,9 @@ class LinuxEnv:
         logger.info("开始卸载 nvm...")
 
         # 检查是否已经安装 nvm
-        success, output = self.ssh_tool.run_cmd("test -d ~/.nvm && echo 'exists' || echo 'not_exists'")
+        success, output = self.ssh_tool.run_cmd(
+            "test -d ~/.nvm && echo 'exists' || echo 'not_exists'"
+        )
         if "not_exists" == output.strip():
             logger.info("nvm 未安装，无需卸载")
             return True
@@ -2451,7 +3024,9 @@ class LinuxEnv:
 
         # 验证卸载是否成功
         logger.info("验证 nvm 卸载...")
-        success, output = self.ssh_tool.run_cmd("test -d ~/.nvm && echo 'exists' || echo 'not_exists'")
+        success, output = self.ssh_tool.run_cmd(
+            "test -d ~/.nvm && echo 'exists' || echo 'not_exists'"
+        )
         if "not_exists" == output.strip():
             logger.info("✓ nvm 卸载成功！")
             logger.info("=" * 70)
@@ -2474,7 +3049,9 @@ class LinuxEnv:
         """设置操作系统为英文环境"""
 
         # 检查并安装英文locale（如果未安装）
-        success, output = self.ssh_tool.run_cmd("locale -a | grep -i 'en_US.utf8' || echo ''")
+        success, output = self.ssh_tool.run_cmd(
+            "locale -a | grep -i 'en_US.utf8' || echo ''"
+        )
         if not success or not output.strip():
             logger.info("Installing en_US.UTF-8 locale...")
             # 对于CentOS/RHEL，需要安装 glibc-langpack-en 或 locales-all
@@ -2491,10 +3068,14 @@ class LinuxEnv:
 
         # 设置系统级别的locale（对于systemd系统）
         logger.info("Setting system locale to en_US.UTF-8...")
-        success, output = self.ssh_tool.run_cmd("localectl set-locale LANG=en_US.UTF-8 2>&1")
+        success, output = self.ssh_tool.run_cmd(
+            "localectl set-locale LANG=en_US.UTF-8 2>&1"
+        )
         if not success:
             # 如果localectl不可用，直接修改 /etc/locale.conf
-            logger.info("localectl not available, modifying /etc/locale.conf directly...")
+            logger.info(
+                "localectl not available, modifying /etc/locale.conf directly..."
+            )
             backup_cmd = "cp /etc/locale.conf /etc/locale.conf.bak 2>/dev/null || true"
             self.ssh_tool.run_cmd(backup_cmd)
 
@@ -2558,7 +3139,9 @@ class LinuxEnv:
             logger.warning("Failed to get admin status")
 
         # 获取操作系统信息（优先使用 /etc/os-release）
-        success, output = self.ssh_tool.run_cmd("cat /etc/os-release 2>/dev/null || echo ''")
+        success, output = self.ssh_tool.run_cmd(
+            "cat /etc/os-release 2>/dev/null || echo ''"
+        )
         if success and output.strip():
             os_info = {}
             for line in output.strip().split("\n"):
@@ -2570,7 +3153,9 @@ class LinuxEnv:
 
             system_info["os_type"] = os_info.get("id", "unknown")
             system_info["os_name"] = os_info.get("pretty_name", "unknown")
-            system_info["os_version"] = os_info.get("version_id", os_info.get("version", "unknown"))
+            system_info["os_version"] = os_info.get(
+                "version_id", os_info.get("version", "unknown")
+            )
         else:
             # 如果 /etc/os-release 不存在，使用 uname
             success, output = self.ssh_tool.run_cmd("uname -s")
@@ -2627,7 +3212,9 @@ class LinuxEnv:
             system_info["cpu_cores"] = "unknown"
 
         # 获取物理 CPU 插槽数 (Sockets)
-        success, output = self.ssh_tool.run_cmd("lscpu 2>/dev/null | grep '^Socket(s):' | awk '{print $2}'")
+        success, output = self.ssh_tool.run_cmd(
+            "lscpu 2>/dev/null | grep '^Socket(s):' | awk '{print $2}'"
+        )
         if success and output.strip():
             try:
                 system_info["cpu_sockets"] = int(output.strip())
@@ -2637,7 +3224,9 @@ class LinuxEnv:
             system_info["cpu_sockets"] = "unknown"
 
         # 获取每插槽核心数 (Cores per socket)
-        success, output = self.ssh_tool.run_cmd("lscpu 2>/dev/null | grep '^Core(s) per socket:' | awk '{print $4}'")
+        success, output = self.ssh_tool.run_cmd(
+            "lscpu 2>/dev/null | grep '^Core(s) per socket:' | awk '{print $4}'"
+        )
         if success and output.strip():
             try:
                 system_info["cores_per_socket"] = int(output.strip())
@@ -2647,7 +3236,9 @@ class LinuxEnv:
             system_info["cores_per_socket"] = "unknown"
 
         # 获取每核心线程数 (Threads per core)
-        success, output = self.ssh_tool.run_cmd("lscpu 2>/dev/null | grep '^Thread(s) per core:' | awk '{print $4}'")
+        success, output = self.ssh_tool.run_cmd(
+            "lscpu 2>/dev/null | grep '^Thread(s) per core:' | awk '{print $4}'"
+        )
         if success and output.strip():
             try:
                 system_info["threads_per_core"] = int(output.strip())
@@ -2657,7 +3248,9 @@ class LinuxEnv:
             system_info["threads_per_core"] = "unknown"
 
         # 获取总逻辑 CPU 数
-        success, output = self.ssh_tool.run_cmd("lscpu 2>/dev/null | grep '^CPU(s):' | awk '{print $2}'")
+        success, output = self.ssh_tool.run_cmd(
+            "lscpu 2>/dev/null | grep '^CPU(s):' | awk '{print $2}'"
+        )
         if success and output.strip():
             try:
                 system_info["total_logical_cpus"] = int(output.strip())
@@ -2668,7 +3261,9 @@ class LinuxEnv:
 
         # 从 /proc/meminfo 获取内存信息（单位：KB）
         # 获取 MemTotal
-        success, output = self.ssh_tool.run_cmd("grep '^MemTotal:' /proc/meminfo | awk '{print $2}'")
+        success, output = self.ssh_tool.run_cmd(
+            "grep '^MemTotal:' /proc/meminfo | awk '{print $2}'"
+        )
         if success and output.strip():
             try:
                 system_info["total_memory"] = int(output.strip())
@@ -2678,7 +3273,9 @@ class LinuxEnv:
             system_info["total_memory"] = "unknown"
 
         # 获取 MemFree
-        success, output = self.ssh_tool.run_cmd("grep '^MemFree:' /proc/meminfo | awk '{print $2}'")
+        success, output = self.ssh_tool.run_cmd(
+            "grep '^MemFree:' /proc/meminfo | awk '{print $2}'"
+        )
         if success and output.strip():
             try:
                 system_info["free_memory"] = int(output.strip())
@@ -2688,7 +3285,9 @@ class LinuxEnv:
             system_info["free_memory"] = "unknown"
 
         # 获取 MemAvailable
-        success, output = self.ssh_tool.run_cmd("grep '^MemAvailable:' /proc/meminfo | awk '{print $2}'")
+        success, output = self.ssh_tool.run_cmd(
+            "grep '^MemAvailable:' /proc/meminfo | awk '{print $2}'"
+        )
         if success and output.strip():
             try:
                 system_info["available_memory"] = int(output.strip())
@@ -2712,10 +3311,14 @@ class LinuxEnv:
         logger.info(f"设置系统时区为: {timezone}")
 
         # 优先使用 timedatectl（systemd 系统）
-        success, output = self.ssh_tool.run_cmd(f"timedatectl set-timezone {timezone} 2>&1")
+        success, output = self.ssh_tool.run_cmd(
+            f"timedatectl set-timezone {timezone} 2>&1"
+        )
         if success:
             # 验证时区是否设置成功
-            verify_success, verify_output = self.ssh_tool.run_cmd("timedatectl | grep 'Time zone'")
+            verify_success, verify_output = self.ssh_tool.run_cmd(
+                "timedatectl | grep 'Time zone'"
+            )
             if verify_success and timezone in verify_output:
                 logger.info(f"成功设置时区为: {timezone}")
                 return True
@@ -2792,7 +3395,9 @@ class LinuxEnv:
 
         # 尝试使用 systemd-timesyncd（systemd 系统）
         logger.debug("尝试使用 systemd-timesyncd 同步时间...")
-        success, output = self.ssh_tool.run_cmd("systemctl is-active systemd-timesyncd 2>&1")
+        success, output = self.ssh_tool.run_cmd(
+            "systemctl is-active systemd-timesyncd 2>&1"
+        )
         if success and output.strip() == "active":
             # 使用 timedatectl 设置NTP服务器并同步
             set_ntp_cmd = f"timedatectl set-ntp true 2>&1"
@@ -3022,5 +3627,4 @@ if __name__ == "__main__":
         password=args.password,
         port=args.port,
     )
-    linux_env.uninstall_mysql8()
-    linux_env.install_mysql8()
+    linux_env.install_nginx()
